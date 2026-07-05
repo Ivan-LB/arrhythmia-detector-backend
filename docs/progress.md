@@ -4,7 +4,7 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 
 ## Current status
 
-**Phase 0 (Research & architecture docs) — complete and pushed.** `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo will be renamed to reflect its new backend-only scope (name TBD). Phase 1 (`ecg_pipeline/` package) not yet started.
+**Phase 0 (Research & architecture docs) — complete and pushed.** `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Phase 1 (`ecg_pipeline/` package) not yet started.
 
 ## Checklist
 
@@ -81,5 +81,7 @@ Tagged the pre-rebuild commit (`51e9924`, "AD_35: End of Semester") as `v1.0` an
 Decided to split into separate repos rather than one monorepo: this repo becomes backend-only (`ecg_pipeline` + `training` + `api`), the web frontend and the future SwiftUI app each get their own repo and talk to this one purely over HTTP. `system-design.md` §3 updated accordingly. Explicitly decided *against* generalizing `ecg_pipeline` into a reusable library for other projects — scoped to what this app needs, revisit only if a real second consumer shows up. Repo rename pending a name decision.
 
 `UI/` stays in this repo and stays working until the web app has visible functional parity — not removed as part of the restructure.
+
+Repo renamed on GitHub: `Ivan-LB/Arrhythmia-Detector` → `Ivan-LB/arrhythmia-detector-backend` (via `gh repo rename`; local `origin` remote updated to match). GitHub auto-redirects the old URL.
 
 **Next up:** Phase 1 — build the `ecg_pipeline/` package.

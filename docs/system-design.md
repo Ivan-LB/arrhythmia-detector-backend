@@ -38,10 +38,10 @@ The key structural fix: **`ecg_pipeline` is one importable Python package**, use
 
 ## 3. Repository split (revised — polyrepo, not monorepo)
 
-This repo (current name `Arrhythmia-Detector`, to be renamed — see plan.md) becomes the **backend repo only**: the shared `ecg_pipeline` package, the training pipeline, and the FastAPI service. The web frontend and the future SwiftUI app each get their own separate repo, consuming this one purely as an HTTP API.
+This repo — renamed from `Arrhythmia-Detector` to **`arrhythmia-detector-backend`** — becomes the **backend repo only**: the shared `ecg_pipeline` package, the training pipeline, and the FastAPI service. The web frontend and the future SwiftUI app each get their own separate repo, consuming this one purely as an HTTP API.
 
 ```
-<this-repo, renamed>/
+arrhythmia-detector-backend/
 ├── ecg_pipeline/                  # shared package — the fix for the duplication bug
 │   ├── __init__.py
 │   ├── preprocessing.py           # channel selection, notch filter, windowing
