@@ -26,12 +26,13 @@ Redo the ECG arrhythmia detector with a literature-defensible ML methodology and
 - [x] `system-design.md`
 - [x] `neural-network-architecture.md`
 
-### Phase 1 — Shared pipeline package (`ecg_pipeline/`)
-- [ ] `ecg_pipeline/preprocessing.py` — channel selection, notch filter, annotation-driven windowing
-- [ ] `ecg_pipeline/features.py` — 9-feature extraction (FFT, wavelet, statistical)
-- [ ] `ecg_pipeline/labels.py` — AAMI EC57 symbol→class mapping
-- [ ] `ecg_pipeline/splits.py` — DS1/DS2 record lists as a single source of truth
-- [ ] Unit tests for all of the above (pure functions — cheap to test directly)
+### Phase 1 — Shared pipeline package (`ecg_pipeline/`) ✅ done — see PR `phase-1-ecg-pipeline` → `v2.0.0`
+- [x] `ecg_pipeline/preprocessing.py` — channel selection, notch filter (zero-phase), annotation-driven windowing
+- [x] `ecg_pipeline/features.py` — 9-feature extraction (FFT/PSD, wavelet, statistical)
+- [x] `ecg_pipeline/labels.py` — AAMI EC57 symbol→class mapping
+- [x] `ecg_pipeline/splits.py` — DS1/DS2 record lists as a single source of truth
+- [x] Unit tests for all of the above — 63 tests, 100% statement coverage
+- [x] Independent code review (python-reviewer) — 2 CRITICAL + 2 HIGH findings, all fixed before merge
 
 ### Phase 2 — Dataset build + training
 - [ ] `training/build_dataset.py` — raw records → `dataset_ds1.csv` / `dataset_ds2.csv`

@@ -84,4 +84,20 @@ Decided to split into separate repos rather than one monorepo: this repo becomes
 
 Repo renamed on GitHub: `Ivan-LB/Arrhythmia-Detector` → `Ivan-LB/arrhythmia-detector-backend` (via `gh repo rename`; local `origin` remote updated to match). GitHub auto-redirects the old URL.
 
-**Next up:** Phase 1 — build the `ecg_pipeline/` package.
+Also established the git workflow going forward: `v2.0.0` is the long-lived dev/integration branch (branched off `main`); each phase gets its own branch off `v2.0.0` (e.g. `phase-1-ecg-pipeline`), opened as a PR for review, merged into `v2.0.0` once approved. `main` only gets the final merge once all phases are done.
+
+### 2026-07-05 — Phase 1: `ecg_pipeline/` package built, reviewed, and fixed
+Built `ecg_pipeline/` (`splits.py`, `labels.py`, `preprocessing.py`, `features.py`) test-first: wrote all 4 test files, confirmed they failed with `ImportError` (RED) since no implementation existed, then implemented each module to make them pass (GREEN). Added a minimal `pyproject.toml` scoped to Phase 1's actual dependencies (numpy, scipy, PyWavelets, pytest) — the rest (tensorflow, fastapi, wfdb, etc.) gets added incrementally as later phases need them, not all upfront. Created a `.venv` and a handful of necessary `.gitignore` entries (venv/pycache/egg-info) pulled forward out of necessity; the full hygiene overhaul stays Phase 5.
+
+Ran an independent `python-reviewer` pass before considering this done, per the project's mandatory code-review rule. It found:
+
+- **CRITICAL** — `_wavelet_features`'s second probability-normalization step divided 0/0 → `NaN` whenever an entire wavelet scale row was all-zero (reachable via a fully degenerate/flatlined window, which `preprocessing.min_max_normalize` explicitly documents as a real output it can produce). Fixed by guarding that division the same way the first one already was.
+- **CRITICAL** — `scipy.stats.skew`/`kurtosis` return `NaN` for any perfectly flat window, via the same flatlined-segment trigger, completely unguarded. Rather than fabricate a placeholder (e.g. silently returning `0.0`) or let `NaN` reach a training matrix, `extract_features` now raises a clear `ValueError` for any window with no real signal variation — the caller (Phase 2's dataset builder) must explicitly exclude that beat, not silently train on an invented number for it.
+- **HIGH** — `TotalPSD` used a hand-rolled power-spectral-density formula off by a factor of N² from the standard periodogram-density formula, and its manual one-sided-spectrum doubling was only valid for even-length windows. Fixed by delegating to `scipy.signal.periodogram(..., scaling="density")` directly, which gets both the scaling and the even/odd-length handling right for free.
+- **HIGH** — `min_max_normalize`'s flat-signal guard used exact floating-point equality (`value_range == 0`), so a window that's flat except for ~1e-14 floating-point residue (plausible upstream-filter artifact on a genuinely flatlined segment) bypassed the guard and produced a spurious full-scale spike at a single sample. Fixed with `np.isclose` instead of exact equality.
+- **MEDIUM** (fixed) — notch filter used causal `lfilter` instead of zero-phase `filtfilt`, which would shift signal content relative to the annotation-centered window this rebuild specifically introduced; added an `fs` precondition check; fixed a `kurtosis`/`skew` import-name shadowing readability hazard; added validation on `window_around_sample`'s `width_seconds`/`fs`.
+- Noted but not fixed (documented rationale, not silently dropped): a `np.hanning(2)` degenerate-window edge case and an `lfilter`-derived `Any` return-type gap for `mypy --strict` — both require pathological inputs this pipeline's actual usage never produces.
+
+All fixes verified: 63 tests passing, 100% statement coverage, zero warnings even with `RuntimeWarning` promoted to a hard error. `data-pipeline-architecture.md` updated to reflect the `filtfilt` change, the corrected `TotalPSD` description, and the new degenerate-window rejection policy.
+
+**Next up:** Phase 2 — dataset build + training.
