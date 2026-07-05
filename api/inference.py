@@ -15,6 +15,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import numpy.typing as npt
+from sklearn.preprocessing import StandardScaler
 from tensorflow import keras
 
 from ecg_pipeline import features as features_module
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class InferenceBundle:
     model: keras.Model
-    scaler: object
+    scaler: StandardScaler
     model_version: str
 
 

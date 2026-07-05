@@ -8,9 +8,13 @@ without a wfdb/MIT-BIH dependency.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import numpy.typing as npt
 from scipy.signal import filtfilt, find_peaks, iirnotch
+
+logger = logging.getLogger(__name__)
 
 NOTCH_FREQ_HZ = 60.0
 NOTCH_QUALITY = 30.0
@@ -103,7 +107,19 @@ def detect_r_peaks(
     The amplitude threshold is relative to the signal's own mean/std
     (mean + amplitude_std_multiplier standard deviations), not a fixed
     absolute value, since raw filtered ECG amplitude varies by device/gain.
+
+    An empty signal returns an empty array rather than computing
+    mean/std of nothing: numpy doesn't raise for that, it emits
+    "Mean of empty slice" / "invalid value encountered" RuntimeWarnings
+    and returns NaN, which find_peaks would then silently receive as an
+    unusable height threshold -- surfacing as warning-stream noise on
+    every call for a truncated/zero-length record instead of a clear,
+    explicit signal that nothing could be detected.
     """
+    if len(signal) == 0:
+        logger.warning("detect_r_peaks called with an empty signal; returning no peaks.")
+        return np.array([], dtype=np.intp)
+
     height_threshold = np.mean(signal) + amplitude_std_multiplier * np.std(signal)
     min_distance_samples = int(min_distance_seconds * fs)
     peaks, _ = find_peaks(signal, distance=min_distance_samples, height=height_threshold)

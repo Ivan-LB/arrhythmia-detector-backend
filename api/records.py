@@ -14,6 +14,8 @@ from pathlib import Path
 
 import wfdb
 
+from ecg_pipeline import preprocessing
+
 MAX_UPLOAD_SIZE_BYTES = 200 * 1024 * 1024  # 200MB -- generous for a MIT-BIH-scale record
 
 
@@ -36,7 +38,18 @@ def _safe_stem(filename: str) -> str:
     path ("../../../etc/230.hea", "/etc/230.hea") rather than silently
     normalizing to just "230.hea" -- suspicious input should fail loudly,
     not be quietly "fixed" into something that happens to work.
+
+    Also rejects control characters (including NUL): Path() doesn't reject
+    an embedded NUL byte at construction time, so a filename like
+    "230.hea\\x00.txt" would otherwise pass every check here and only fail
+    later at the OS syscall boundary in write_bytes() with an unhandled
+    ValueError -- a real crash reachable from a hand-crafted multipart
+    request (confirmed: httpx/browsers won't produce this, but curl and
+    raw sockets will), not caught by this module's own except-and-wrap
+    pattern since it happens before that try block runs.
     """
+    if any(ord(character) < 0x20 for character in filename):
+        raise InvalidRecordUpload(f"Invalid filename (contains control characters): {filename!r}")
     path = Path(filename)
     if path.is_absolute() or path.name != filename or not path.name or path.name in (".", ".."):
         raise InvalidRecordUpload(f"Invalid filename (must be a plain filename, no path components): {filename!r}")
@@ -78,8 +91,10 @@ def save_uploaded_record(
             f"hea and dat files must share the same base name; got {hea_stem!r} and {dat_stem!r}"
         )
 
-    has_annotations = atr_filename is not None
+    has_annotations = atr_filename is not None or atr_content is not None
     if has_annotations:
+        if atr_filename is None or atr_content is None:
+            raise InvalidRecordUpload("atr_filename and atr_content must both be provided, or neither")
         _check_size("atr file", atr_content)
         atr_stem = _safe_stem(atr_filename)
         if atr_stem != hea_stem:
@@ -94,11 +109,13 @@ def save_uploaded_record(
     (record_dir / f"{hea_stem}.hea").write_bytes(hea_content)
     (record_dir / f"{hea_stem}.dat").write_bytes(dat_content)
     if has_annotations:
+        assert atr_content is not None  # narrowed above; re-asserted for mypy across the branch
         (record_dir / f"{hea_stem}.atr").write_bytes(atr_content)
 
     record_path = record_dir / hea_stem
     try:
-        wfdb.rdrecord(str(record_path))
+        record = wfdb.rdrecord(str(record_path))
+        preprocessing.find_mlii_channel(record.sig_name)
         if has_annotations:
             wfdb.rdann(str(record_path), "atr")
     except Exception as error:

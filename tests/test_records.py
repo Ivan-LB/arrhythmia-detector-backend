@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 import wfdb
 
@@ -10,6 +11,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _read_bytes(relative_path: str) -> bytes:
     return (REPO_ROOT / relative_path).read_bytes()
+
+
+def _write_synthetic_record(write_dir: Path, record_name: str, sig_name: list[str]) -> tuple[bytes, bytes]:
+    """Write a tiny, real, valid wfdb record with a caller-chosen lead name
+    -- used to test behavior for records that don't have MLII, which none
+    of the real fixture files in this repo exercise.
+    """
+    signal = np.zeros((360, len(sig_name)))
+    wfdb.wrsamp(
+        record_name,
+        fs=360,
+        units=["mV"] * len(sig_name),
+        sig_name=sig_name,
+        p_signal=signal,
+        fmt=["16"] * len(sig_name),
+        write_dir=str(write_dir),
+    )
+    hea_bytes = (write_dir / f"{record_name}.hea").read_bytes()
+    dat_bytes = (write_dir / f"{record_name}.dat").read_bytes()
+    return hea_bytes, dat_bytes
 
 
 class TestSaveUploadedRecord:
@@ -96,6 +117,15 @@ class TestSaveUploadedRecordWithAnnotations:
         annotation = wfdb.rdann(str(stored.record_path), "atr")
         assert len(annotation.sample) > 0
 
+    def test_rejects_atr_filename_provided_without_atr_content(self, tmp_path: Path):
+        hea_bytes = _read_bytes("Data/Dataset/Train/230.hea")
+        dat_bytes = _read_bytes("Data/Dataset/Train/230.dat")
+
+        with pytest.raises(InvalidRecordUpload, match="must both be provided"):
+            save_uploaded_record(
+                tmp_path, "230.hea", hea_bytes, "230.dat", dat_bytes, atr_filename="230.atr", atr_content=None
+            )
+
     def test_without_an_atr_file_has_annotations_is_false(self, tmp_path: Path):
         hea_bytes = _read_bytes("Data/Dataset/Train/230.hea")
         dat_bytes = _read_bytes("Data/Dataset/Train/230.dat")
@@ -129,3 +159,37 @@ class TestSaveUploadedRecordWithAnnotations:
                 atr_filename="../../../etc/230.atr",
                 atr_content=atr_bytes,
             )
+
+
+class TestSaveUploadedRecordSecurityFixes:
+    def test_rejects_a_nul_byte_in_the_hea_filename_with_a_clean_error_not_a_crash(self, tmp_path: Path):
+        # Regression test: Path() doesn't reject an embedded NUL byte at
+        # construction time, so this used to pass filename validation and
+        # only fail later at the OS syscall boundary in write_bytes() with
+        # an unhandled ValueError -- a real crash, not a clean 400.
+        hea_bytes = _read_bytes("Data/Dataset/Train/230.hea")
+        dat_bytes = _read_bytes("Data/Dataset/Train/230.dat")
+
+        with pytest.raises(InvalidRecordUpload, match="control characters"):
+            save_uploaded_record(tmp_path, "230.hea\x00.txt", hea_bytes, "230.dat", dat_bytes)
+
+    def test_rejects_a_nul_byte_in_the_dat_filename(self, tmp_path: Path):
+        hea_bytes = _read_bytes("Data/Dataset/Train/230.hea")
+        dat_bytes = _read_bytes("Data/Dataset/Train/230.dat")
+
+        with pytest.raises(InvalidRecordUpload, match="control characters"):
+            save_uploaded_record(tmp_path, "230.hea", hea_bytes, "230.dat\x00.txt", dat_bytes)
+
+    def test_rejects_a_record_with_no_mlii_lead_at_upload_time_not_later(self, tmp_path: Path):
+        # Regression test: a record without MLII used to be accepted at
+        # upload (200), then crash every subsequent GET /beats and
+        # GET /signal call with an unhandled ValueError from
+        # find_mlii_channel deep in ecg_pipeline.preprocessing. Catching
+        # this at upload time means the client gets one clear 400 instead
+        # of a misleading "success" followed by every read failing.
+        write_dir = tmp_path / "synthetic_source"
+        write_dir.mkdir()
+        hea_bytes, dat_bytes = _write_synthetic_record(write_dir, "novel", sig_name=["V1", "V5"])
+
+        with pytest.raises(InvalidRecordUpload):
+            save_uploaded_record(tmp_path, "novel.hea", hea_bytes, "novel.dat", dat_bytes)
