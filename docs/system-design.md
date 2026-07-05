@@ -36,10 +36,12 @@ flowchart LR
 
 The key structural fix: **`ecg_pipeline` is one importable Python package**, used by both the offline training script and the FastAPI service. Today the same functions (`get_ml_ii_index`, `calculate_fft_and_wavelet`, `apply_window`, `min_max_normalize`) are copy-pasted between `ModelCreation/ModelPreparation.py` and `UI/ecg_feature_extractor.py` — a parameter tweak in one silently doesn't reach the other. There is exactly one implementation from here on.
 
-## 3. Proposed repository structure
+## 3. Repository split (revised — polyrepo, not monorepo)
+
+This repo (current name `Arrhythmia-Detector`, to be renamed — see plan.md) becomes the **backend repo only**: the shared `ecg_pipeline` package, the training pipeline, and the FastAPI service. The web frontend and the future SwiftUI app each get their own separate repo, consuming this one purely as an HTTP API.
 
 ```
-arrhythmia-detector/
+<this-repo, renamed>/
 ├── ecg_pipeline/                  # shared package — the fix for the duplication bug
 │   ├── __init__.py
 │   ├── preprocessing.py           # channel selection, notch filter, windowing
@@ -54,19 +56,26 @@ arrhythmia-detector/
 │   ├── main.py                    # FastAPI app
 │   ├── inference.py                # loads model+scaler, calls ecg_pipeline
 │   └── schemas.py                 # request/response Pydantic models
-├── web/                            # React/Next.js frontend (Phase 1)
-├── native/                         # SwiftUI app (Phase 2)
+├── UI/                             # existing PyQt app — kept until the web app has visible functional parity, then retired
 ├── tests/
 │   ├── test_pipeline.py
-│   ├── test_api.py
-│   └── test_web/
+│   └── test_api.py
 ├── models/                         # versioned artifacts (see NN doc §7)
 ├── docs/
 ├── pyproject.toml
 └── README.md
 ```
 
-`UI/` (PyQt) is retired once the web app covers the same functionality — not deleted immediately, but not extended further either.
+Two separate repos, created when their phase starts:
+
+- **Web frontend repo** (Phase 4) — React/Next.js, talks to this repo's API over HTTP only. No shared code, no monorepo tooling needed.
+- **Native app repo** (Phase 6) — SwiftUI, same API, same story.
+
+Why this is better than the monorepo this doc originally proposed: both future clients (web now, native later) are genuinely just HTTP consumers of one API — they don't need shared code with the backend, don't need to build/deploy together, and a portfolio reviewer looking at "the backend repo" sees a focused, single-purpose project instead of a Python/TypeScript/Swift grab-bag. It also mirrors how this split would actually be organized professionally.
+
+One explicit non-goal: **this repo is not being generalized into a reusable ECG-processing library for other projects.** `ecg_pipeline` is scoped to what this app's training pipeline and API actually need. If a second real consumer shows up later wanting the feature-extraction code independently, that's the point to extract it into its own package — not before, on spec.
+
+`UI/` (PyQt) is retired only once the web app has visible, functional parity — not deleted as a side effect of this restructure.
 
 ## 4. API contract (sketch)
 

@@ -4,7 +4,7 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 
 ## Current status
 
-**Phase 0 (Research & architecture docs) — complete.** Phase 1 (`ecg_pipeline/` package) not yet started.
+**Phase 0 (Research & architecture docs) — complete and pushed.** `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo will be renamed to reflect its new backend-only scope (name TBD). Phase 1 (`ecg_pipeline/` package) not yet started.
 
 ## Checklist
 
@@ -74,5 +74,12 @@ Key scope decisions made and flagged for confirmation: rhythm classification dro
 
 ### 2026-07-05 — Windowing-before-FFT gap (found while reviewing with the original author)
 While walking through `ModelPreparation.py` history, surfaced that `calculate_fft_and_wavelet()` has always run the FFT on a raw truncated segment with no analysis window applied — meaning `SpectralEnergy`/`TotalPSD` have been carrying avoidable spectral leakage since the feature was first written. `ModelCreation/sineWave.py` (DSP coursework utilities, different author, never wired into the real pipeline) already had Hann/Hamming/Blackman window generators sitting unused. `data-pipeline-architecture.md` §5 updated to apply a Hann window before the FFT/PSD step — chosen over Blackman because these features measure aggregate spectral shape rather than resolving closely-spaced frequencies, so leakage suppression matters more than main-lobe narrowness, and Hann is the standard default for this in ECG spectral analysis. Wavelet-based features are unaffected — CWT doesn't carry FFT's periodicity assumption.
+
+### 2026-07-05 — v1.0 tagged, docs pushed, repo split decided
+Tagged the pre-rebuild commit (`51e9924`, "AD_35: End of Semester") as `v1.0` and pushed it — this is the permanent snapshot of the original degree project. Committed and pushed the five `docs/` files as the first commit of v2.0 (`190f384`). Repo is confirmed already public on GitHub.
+
+Decided to split into separate repos rather than one monorepo: this repo becomes backend-only (`ecg_pipeline` + `training` + `api`), the web frontend and the future SwiftUI app each get their own repo and talk to this one purely over HTTP. `system-design.md` §3 updated accordingly. Explicitly decided *against* generalizing `ecg_pipeline` into a reusable library for other projects — scoped to what this app needs, revisit only if a real second consumer shows up. Repo rename pending a name decision.
+
+`UI/` stays in this repo and stays working until the web app has visible functional parity — not removed as part of the restructure.
 
 **Next up:** Phase 1 — build the `ecg_pipeline/` package.
