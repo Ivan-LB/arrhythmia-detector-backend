@@ -4,7 +4,7 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 
 ## Current status
 
-**Phase 0 merged into `v2.0.0`. Phase 1 merged into `v2.0.0`. Phase 2 done, PR open awaiting review** (not yet merged). `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Real trained model + DS2 evaluation exist (63.22% accuracy — see Phase 2 log entry below for what that number does and doesn't mean). Phase 3 (FastAPI backend) not started; waits for Phase 2 to merge first.
+**Phases 0-2 merged into `v2.0.0`. Phase 3 done, PR open awaiting review** (not yet merged). `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Real trained model + DS2 evaluation exist (63.22% accuracy — see Phase 2 log entry for what that number does and doesn't mean). A working FastAPI service now sits in front of that model, verified against a real running server, not just in-process tests. Phase 4 (React/Next.js frontend, its own new repo) not started; waits for Phase 3 to merge first.
 
 ## Checklist
 
@@ -31,11 +31,13 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 - [x] `training/class_encoding.py` (added during review — shared, validated class<->index mapping)
 - [x] First versioned model artifact (`beat-classifier-20260705-dc9f983`, DS2 accuracy 63.22%)
 
-### Phase 3 — FastAPI backend
-- [ ] `api/main.py` / `inference.py` / `schemas.py`
-- [ ] Endpoints implemented
-- [ ] Config via env vars
-- [ ] API tests
+### Phase 3 — FastAPI backend ✅ done, PR open
+- [x] `api/main.py` / `inference.py` / `records.py` / `schemas.py`
+- [x] Endpoints implemented (`/health`, `POST /records`, `GET /records/{id}/beats`, `GET /records/{id}/signal`)
+- [x] Config via env vars (`MODEL_DIR`, required)
+- [x] API tests (32 tests) + verified against a real running uvicorn server
+- [x] `ecg_pipeline.preprocessing.detect_r_peaks` (new, for live-uploaded recordings with no ground truth)
+- [x] Two parallel code reviews (correctness + security) — all findings fixed
 
 ### Phase 4 — React/Next.js frontend
 - [ ] Project scaffold
@@ -124,4 +126,25 @@ All fixes verified: 63 tests passing, 100% statement coverage, zero warnings eve
 
 108 tests, 94% combined coverage. PR open (`phase-2-dataset-training` → `v2.0.0`), awaiting review.
 
-**Next up:** Phase 3 — FastAPI backend (once Phase 2 is reviewed and merged).
+### 2026-07-05 — Phase 3: FastAPI backend, plus a real memory-exhaustion DoS caught before it shipped
+
+**New capability needed first: `ecg_pipeline.preprocessing.detect_r_peaks`.** Training/evaluation use the MIT-BIH annotation's own sample index as ground truth for where each beat is — a live-uploaded recording has no such annotations, so something has to find the beats. Added a corrected R-peak detector (`min_distance_seconds=0.2`, ~300bpm max) fixing the original pipeline's `distance=0.7*fs` bug (~86bpm max, structurally blind to tachycardia). Validated against a real record: 91.5% of the true annotated beat count detected — a reasonable approximation, not expected to match ground truth exactly.
+
+**Built `api/records.py`, `api/inference.py`, `api/main.py`, `api/schemas.py` test-first**, wiring `/health`, `POST /records` (multipart `.hea`/`.dat`, optional `.atr` for ground truth), `GET /records/{id}/beats`, `GET /records/{id}/signal`. `create_app()` is a factory (not a fixed module instance) so tests can point it at a small/fast model; the real `MODEL_DIR` env var is only required when actually running the service (via a PEP 562 module `__getattr__`), not merely importing the module.
+
+**Manually verified against a real running server** (`uvicorn`, not just FastAPI's in-process `TestClient`): uploaded a real MIT-BIH record, got 2255 classified beats back, confirmed annotation-based vs. self-detected `beat_source`, 400s/404s behave correctly, `/docs` (OpenAPI) loads, zero errors in the server log.
+
+**Two parallel code reviews** (python-reviewer for correctness/design, security-reviewer for the file-upload surface specifically) found real, fixable problems:
+
+- **HIGH (security) — memory-exhaustion DoS, exploitable today with a single unauthenticated request.** Uploads were read fully into memory (`await file.read()`) before any size check ran; Starlette's own multipart parser has no total-body-size ceiling of its own (confirmed by reading its source directly), so a multi-GB request body would be fully materialized in process memory before the 200MB app-level check was ever consulted. Fixed: read in bounded 1MB chunks with an early abort as soon as the limit is crossed.
+- **HIGH (correctness) — a record with no MLII lead crashed every read, not the upload.** Upload only validated that the file parsed as *some* wfdb record, not that it had an MLII channel — accepted with 200, then an unhandled `ValueError` on every subsequent `GET /beats`/`GET /signal`. None of the test fixtures (all using record 230, which has MLII) caught this. Fixed: validate MLII presence at upload time, one clear 400 instead.
+- **HIGH (correctness) — zero caching, and concurrent requests effectively serialized.** Every `GET /beats` recomputed the entire filter → detect/read-annotations → extract-features → predict pipeline from scratch — measured at ~2.1s/call on a real record, repeated identically on every call. 8 concurrent calls took ~24s (roughly 8x, not parallelized) due to GIL contention on the CPU-bound per-beat feature-extraction loop. Fixed: cache the computed response per record after first computation. Confirmed against the real server: first call 2.3s, every call after ~10ms.
+- **HIGH (correctness) — no eviction.** Uploaded records and their on-disk directories lived for the entire process lifetime with nothing ever removing them. Added a configurable FIFO cap (default 50) evicting the oldest record (dict entry + directory together) once exceeded — proportionate for a portfolio/demo-scale service; still no idle-TTL, which would need revisiting for a real deployment.
+- **MEDIUM (security) — a NUL byte in a filename crashed with an unhandled `ValueError`** instead of the clean 400 every other invalid-upload path already produced (confirmed reachable via a hand-crafted multipart request, not through httpx/browsers, which won't produce a raw NUL). Fixed with an explicit control-character check.
+- **MEDIUM (security) — blocking disk I/O and wfdb parsing inside an `async def` handler** blocks the event loop (including `/health`) for the duration of every upload. Offloaded to a thread pool.
+- **MEDIUM (mypy type-safety)** — `InferenceBundle.scaler` was typed as bare `object` (now `StandardScaler`), `beat_source` was inferred as plain `str` (now `Literal["annotations", "detected"]`, matching the response schema), `UploadFile.filename` narrowing made explicit. mypy is now clean across `api/` and `ecg_pipeline/`.
+- **Verified NOT exploitable** (no fix needed): path traversal via filename or wfdb-header-embedded paths (wfdb's own field regexes structurally can't contain `/`), and injection/RCE via malicious `.hea`/`.dat`/`.atr` content (wfdb parses through fixed regexes and `int()`/`float()`, no `eval`/dynamic code paths anywhere in its parsing).
+
+151 tests, 94% combined coverage, mypy clean. PR open (`phase-3-fastapi-backend` → `v2.0.0`), awaiting review.
+
+**Next up:** Phase 4 — React/Next.js frontend (its own new repo, per the polyrepo decision), once Phase 3 is reviewed and merged.
