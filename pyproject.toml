@@ -7,6 +7,12 @@ dependencies = [
     "numpy>=1.26",
     "scipy>=1.11",
     "PyWavelets>=1.5",
+    "wfdb>=4.1",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "imbalanced-learn>=0.12",
+    "tensorflow>=2.16",
+    "joblib>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -20,7 +26,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["ecg_pipeline*"]
+include = ["ecg_pipeline*", "training*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
