@@ -50,7 +50,7 @@ flowchart TD
     H --> I["Append to DS1 or DS2 dataset per record membership"]
 ```
 
-Steps 1–3 (channel selection, mean-centering, notch filter) are unchanged from the current code — they're sound. Step 4 is the one deliberate change:
+Steps 1–2 (channel selection, mean-centering) are unchanged from the current code. Step 3 (notch filter) has one refinement found during implementation and code review: use `scipy.signal.filtfilt` (zero-phase, forward-backward) instead of `lfilter` (causal). This preprocessing runs entirely offline, and step 4 centers each window on the annotation's own sample index — a causal filter's phase delay (~158ms measured near 60 Hz at fs=360) would shift signal content relative to that fixed center point, distorting the exact QRS morphology the windowing is trying to capture cleanly. filtfilt removes that at negligible extra cost for a batch pipeline. Step 4 is the other deliberate change:
 
 ### The one real change: window centers come from annotations, not re-detected peaks
 
@@ -77,7 +77,7 @@ With that fixed, the feature set is 9 columns:
 |---|---|
 | `RPeakCount` | Count of secondary peaks within the window exceeding 0.6 (normalized amplitude), min separation 0.45s — flags extra beats inside the window |
 | `SpectralEnergy` | Sum of FFT power spectrum |
-| `TotalPSD` | Total power spectral density (frequency-normalized) |
+| `TotalPSD` | Sum of the power spectral density across frequency bins, via `scipy.signal.periodogram(..., scaling="density")` — an initial hand-rolled version used a non-standard formula off by a factor of N² from the textbook density scaling; delegating to scipy fixed both that and a latent even/odd-length-window edge case |
 | `WaveletEnergy` | Energy of the continuous Mexican-hat wavelet transform (scales 1–16) |
 | `ShannonEntropy` | Mean Shannon entropy of the wavelet coefficient distribution across scales |
 | `SignalSTD` | Standard deviation of the normalized window |
@@ -86,6 +86,8 @@ With that fixed, the feature set is 9 columns:
 | `Variance` | Variance of the normalized window (**newly included**) |
 
 This feature-extraction logic must live in exactly one place, imported by both the offline dataset-builder and the live inference API — see [system-design.md](system-design.md) §4. Today it's duplicated verbatim between `ModelCreation/ModelPreparation.py` and `UI/ecg_feature_extractor.py`, which is how they've already started silently drifting.
+
+**Degenerate windows are rejected, not fabricated a placeholder value.** A window with no real signal variation (a flatlined/disconnected-lead segment — a real, if uncommon, MIT-BIH artifact) can't yield a meaningful skewness, kurtosis, or spectral shape: `scipy.stats.skew`/`kurtosis` return `NaN` for a constant array, and a wavelet scale row with all-zero coefficients can hit a 0/0 division in the Shannon entropy calculation. Rather than let either produce `NaN` silently (which would poison a training matrix) or substitute an invented placeholder value, `extract_features` raises a clear `ValueError` for this case. The dataset builder (Phase 2) must catch this per-beat and exclude/log it — it is not the feature extractor's job to decide what an invalid beat is worth.
 
 ## 6. Labeling — AAMI EC57 5-superclass scheme
 

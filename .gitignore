@@ -3,3 +3,11 @@ UI/__pycache__/app.cpython-39.pyc
 UI/__pycache__/draggableLabel.cpython-39.pyc
 UI/__pycache__/ecg_feature_extractor.cpython-39.pyc
 ModelCreation/__pycache__/sineWave.cpython-39.pyc
+
+# Minimal additions to develop Phase 1 safely -- full .gitignore overhaul is Phase 5
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.coverage
