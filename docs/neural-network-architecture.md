@@ -38,41 +38,55 @@ These layer sizes/dropout rates/regularization strengths are carried over as a s
 | Optimizer | `SGD(learning_rate=0.05, momentum=0.9)` | unchanged — `ANNModel_Prueba.py`'s alternative optimizers (Adamax/RMSprop, left commented out) are dropped along with that whole duplicate script |
 | Epochs | 90 | unchanged |
 | Batch size | 80 | unchanged |
-| Validation split | 0.15 (carved out of DS1) | unchanged — DS2 is never touched until final evaluation |
+| Validation split | 0.15, carved out of DS1 **by RecordID (patient), not randomly by beat** | changed — see rationale below |
 | Callbacks | `EarlyStopping(monitor='val_loss', patience=10)`, `ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)` | unchanged, both reasonable |
+
+The validation carve-out uses `GroupShuffleSplit` grouped by `RecordID`, not a plain random `validation_split=0.15`. A random beat-level validation split would let the same patient's beats appear in both the training-proper and validation partitions — reintroducing the exact patient-identity leakage problem this whole rebuild exists to fix, just one level down at the validation step instead of the train/test step.
 
 ## 5. Class imbalance handling
 
-SMOTE applied to the DS1 training partition **after** scaling (matching the correct half of the current code — `ANNModel.py` gets this right; `ANNModel_Prueba.py` has a live bug here, fitting a single `scaler` object twice on two incompatible feature sets and then resampling the *unscaled* arrays instead of the scaled ones. That whole script is retired, not fixed in place, since it's a near-duplicate of `ANNModel.py` with drifted, partially-broken logic).
+**Changed from the original plan during implementation — not SMOTE.** The original plan (and the original project) used SMOTE to fully balance classes. Running it for real surfaced why that doesn't work at this data's actual scale: the Q class had only **2 real examples** in the training partition (of ~41,848 rows) — SMOTE oversampled that to match the ~37,782-row N class, an **18,891x amplification**, meaning nearly 38,000 "Q" training rows were mathematically interpolated on a single line segment between 2 real points. That's fabricating data to reach a number, not a legitimate imbalance-handling technique (and directly at odds with this project's standing rule against inventing data).
 
-`SMOTE(random_state=<fixed>)` — currently unseeded, so the synthetic minority oversampling itself is non-deterministic across runs even when everything else is held constant.
+Plain sklearn `"balanced"` class_weight has the same problem in a different shape: with only 2 real Q examples, it computes a weight of ~4185 (vs ~20 for F, the next-rarest class) — confirmed empirically to blow up training (`val_loss` ~16 instead of the ~1.6 random-guessing baseline for 5 classes), since a single Q example in a batch dominates the gradient.
+
+**Final approach**: `class_weight` passed to `model.fit()`, computed via `sklearn.utils.class_weight.compute_class_weight("balanced", ...)`, with the largest weight capped at the second-highest naturally-occurring weight in that run's own distribution — not a memorized constant, so it self-adjusts if the class distribution ever shifts. No oversampling, no fabricated rows at all. See `training/train.py`'s `compute_class_weights()` for the implementation and `docs/progress.md`'s Phase 2 entry for the full empirical trail (SMOTE → uncapped balanced weight → capped weight) that led here.
+
+Reproducibility: `keras.utils.set_random_seed(seed)` covers Python/NumPy/TensorFlow in one call, set once at the top of `train()`.
 
 ## 6. Reproducibility
 
-- `numpy.random.seed(...)` and `tf.random.set_seed(...)` (or `keras.utils.set_random_seed(...)`) set once, explicitly, at the top of the training script — absent anywhere in the current codebase.
-- The train/test partition is now the fixed DS1/DS2 list (see data-pipeline doc §3), not a `random_state`-seeded shuffle — one less source of run-to-run variance by construction.
+- `keras.utils.set_random_seed(seed)` — one call, covers Python/NumPy/TensorFlow together — set once, explicitly, at the top of `train()`. Absent anywhere in the original codebase.
+- The train/test partition is the fixed DS1/DS2 list (see data-pipeline doc §3), not a `random_state`-seeded shuffle — one less source of run-to-run variance by construction. The internal train/validation carve-out within DS1 *is* seeded (`GroupShuffleSplit(random_state=seed)`) since it has to choose which records go where.
 
-## 7. Evaluation protocol
+## 7. Evaluation protocol — implemented, with real results
 
 Evaluated once, on DS2, after training is finalized on DS1 — never used for tuning decisions.
 
-Report **per-class Sensitivity, Positive Predictivity, and Specificity**, not just overall accuracy — accuracy alone is misleading here because Normal beats dominate MIT-BIH so heavily that a model could score high accuracy while missing most S/V/F beats entirely, which are the clinically important ones. This is standard practice throughout the inter-patient MIT-BIH literature.
+Reports **per-class Sensitivity, Positive Predictivity, Specificity, and Negative Predictivity**, not just overall accuracy — accuracy alone is misleading here because Normal beats dominate MIT-BIH so heavily that a model could score high accuracy while missing most S/V/F/Q beats entirely, which are the clinically important ones. `training/evaluate.py`'s `calculate_class_metrics()` is a direct, type-hinted port of `ANNModel.py`'s original `calculate_metrics()` function — that part of the original code was already correct and worth keeping as-is.
 
-Worth keeping as-is: `ANNModel.py` already has a `calculate_metrics()`/`get_all_metrics()` pair that computes exactly Sensitivity/Specificity/PPV/NPV per class from a confusion matrix — that part of the current code is correct and reusable, just needs to be pointed at the DS2-based confusion matrix with the corrected 5-class labels instead of the current buggy split.
+**Real DS2 result (2026-07-05, model `beat-classifier-20260705-dc9f983`): 63.22% overall accuracy.**
 
-Expect S-class sensitivity to be the weakest number — it's the rarest class by a wide margin (see data-pipeline doc §7) and is reported as the hardest class across the published literature, not a sign of a bug.
+| Class | Sensitivity | Specificity | PPV | NPV |
+|---|---|---|---|---|
+| N | 64.8% | 73.2% | 95.1% | 20.4% |
+| S | 24.5% | 93.7% | 13.1% | 97.0% |
+| V | 64.6% | 84.0% | 21.8% | 97.2% |
+| F | 61.3% | 87.1% | 3.6% | 99.7% |
+| Q | 0.0% | 100.0% | 0.0% | 99.99% |
 
-## 8. Model artifact versioning
+Honestly far below the original (leaky) pipeline's ~98-99% — that's the point: this reflects true inter-patient generalization, not memorized patient identity. Q's 0% is expected, not a bug: only 2 real training examples exist for it (see §5). Minority-class PPV is weak (S/V/F all under ~22%) — a real precision/recall tradeoff from the class weighting needed to get any recall at all on classes this rare, not a defect. This is a first correct baseline, not a tuned final model — see `docs/progress.md`'s Phase 2 entry for the full context and the comparison against published inter-patient benchmarks researched in Phase 0.
 
-Replaces the current unversioned, untraceable naming (`modelo_ecg_beat.h5` vs `modelo_ecg_beatV2.h5`, with no committed script that produced the `V2` files actually loaded by the UI). Proposed scheme:
+## 8. Model artifact versioning — implemented
+
+Replaces the current unversioned, untraceable naming (`modelo_ecg_beat.h5` vs `modelo_ecg_beatV2.h5`, with no committed script that produced the `V2` files actually loaded by the UI). Implemented scheme:
 
 ```
 models/
   beat-classifier-{YYYYMMDD}-{short-git-sha}/
-    model.h5
+    model.keras         # modern Keras 3 native format, not the legacy .h5
     scaler.pkl
-    metrics.json        # DS2 confusion matrix + per-class Se/P+/Sp, for traceability
-    training_config.json  # hyperparameters, feature list, split identifiers (DS1/DS2)
+    metrics.json          # DS2 confusion matrix + per-class Se/Sp/PPV/NPV, for traceability
+    training_config.json  # hyperparameters, feature list, split record IDs, per-class train/val counts, class weights used
 ```
 
 The API (see [system-design.md](system-design.md) §4) always loads a specific, named version — never "whatever happens to be in the `Models/` folder" — so it's always possible to answer "which training run produced the model currently being served."

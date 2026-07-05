@@ -34,11 +34,13 @@ Redo the ECG arrhythmia detector with a literature-defensible ML methodology and
 - [x] Unit tests for all of the above — 63 tests, 100% statement coverage
 - [x] Independent code review (python-reviewer) — 2 CRITICAL + 2 HIGH findings, all fixed before merge
 
-### Phase 2 — Dataset build + training
-- [ ] `training/build_dataset.py` — raw records → `dataset_ds1.csv` / `dataset_ds2.csv`
-- [ ] `training/train.py` — scaler (fit on DS1 only) + SMOTE (DS1 only) + model training, seeded
-- [ ] `training/evaluate.py` — DS2 confusion matrix + per-class Se/P+/Sp table
-- [ ] First versioned model artifact under `models/`
+### Phase 2 — Dataset build + training ✅ done — see PR `phase-2-dataset-training` → `v2.0.0`
+- [x] `training/build_dataset.py` — raw records → `dataset_ds1.csv` / `dataset_ds2.csv` (50,995 / 49,687 real rows)
+- [x] `training/train.py` — scaler (fit on train-only) + capped class weights (not SMOTE — see progress.md) + model training, seeded
+- [x] `training/evaluate.py` — DS2 confusion matrix + per-class Se/Sp/PPV/NPV table
+- [x] First versioned model artifact under `models/` — real DS2 accuracy 63.22%
+- [x] Independent code review (python-reviewer) — 1 CRITICAL + 2 HIGH findings, all fixed before merge
+- [x] Fixed a real data-completeness gap: 19 of 20 required 100-series MIT-BIH records had no `.atr` annotations committed at all, and one had no `.hea` header — re-fetched clean copies from PhysioNet
 
 ### Phase 3 — FastAPI backend
 - [ ] `api/main.py`, `api/inference.py`, `api/schemas.py`
