@@ -4,7 +4,7 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 
 ## Current status
 
-**Phase 0 (Research & architecture docs) — complete and pushed.** `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Phase 1 (`ecg_pipeline/` package) not yet started.
+**Phase 0 merged into `v2.0.0`. Phase 1 merged into `v2.0.0`. Phase 2 done, PR open awaiting review** (not yet merged). `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Real trained model + DS2 evaluation exist (63.22% accuracy — see Phase 2 log entry below for what that number does and doesn't mean). Phase 3 (FastAPI backend) not started; waits for Phase 2 to merge first.
 
 ## Checklist
 
@@ -17,18 +17,19 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 - [x] `plan.md`
 - [x] `progress.md` (this file)
 
-### Phase 1 — Shared pipeline package
-- [ ] `ecg_pipeline/preprocessing.py`
-- [ ] `ecg_pipeline/features.py`
-- [ ] `ecg_pipeline/labels.py`
-- [ ] `ecg_pipeline/splits.py`
-- [ ] Unit tests
+### Phase 1 — Shared pipeline package ✅ merged
+- [x] `ecg_pipeline/preprocessing.py`
+- [x] `ecg_pipeline/features.py`
+- [x] `ecg_pipeline/labels.py`
+- [x] `ecg_pipeline/splits.py`
+- [x] Unit tests (63 tests, 100% coverage)
 
-### Phase 2 — Dataset build + training
-- [ ] `training/build_dataset.py`
-- [ ] `training/train.py`
-- [ ] `training/evaluate.py`
-- [ ] First versioned model artifact
+### Phase 2 — Dataset build + training ✅ done, PR open
+- [x] `training/build_dataset.py`
+- [x] `training/train.py`
+- [x] `training/evaluate.py`
+- [x] `training/class_encoding.py` (added during review — shared, validated class<->index mapping)
+- [x] First versioned model artifact (`beat-classifier-20260705-dc9f983`, DS2 accuracy 63.22%)
 
 ### Phase 3 — FastAPI backend
 - [ ] `api/main.py` / `inference.py` / `schemas.py`
@@ -101,3 +102,26 @@ Ran an independent `python-reviewer` pass before considering this done, per the 
 All fixes verified: 63 tests passing, 100% statement coverage, zero warnings even with `RuntimeWarning` promoted to a hard error. `data-pipeline-architecture.md` updated to reflect the `filtfilt` change, the corrected `TotalPSD` description, and the new degenerate-window rejection policy.
 
 **Next up:** Phase 2 — dataset build + training.
+
+### 2026-07-05 — Phase 2: dataset build, training, evaluation — and a real data-fabrication bug caught before it shipped
+
+**Data completeness gap found and fixed first.** Before writing any Phase 2 code, verified the DS1/DS2 record files were actually complete (per the "verify in the source" rule) rather than assuming the committed `Data/Dataset/` folders had everything. They didn't: 19 of the 20 required 100-series records had no `.atr` annotation file at all (only `.dat`/`.hea`), and record 113 was missing even its `.hea` header — unreadable as-is. Only the 200-series records (already `.atr`-complete) were usable. Re-fetched clean copies of all 20 100-series records directly from PhysioNet's `mitdb` via `wfdb.dl_database()`, removed a stray corrupted `108.at_` file, and verified all 44 DS1/DS2 records now load correctly with MLII present. This corrects something said earlier in this project: MIT-BIH-only does *not* mean "zero new downloads" — it needed this one.
+
+**Built `ecg_pipeline`-consuming pipeline test-first**: `training/build_dataset.py` (raw records → labeled feature CSVs), `training/train.py` (DS1 training with a group-aware internal validation split), `training/evaluate.py` (DS2 confusion matrix + per-class Se/Sp/PPV/NPV). Ran the real dataset build against all 44 records: 50,995 DS1 rows / 49,687 DS2 rows, zero NaN, class distribution matching the published de Chazal 2004 inter-patient counts closely (N ~90%, S/V/F/Q all in the same ballpark as the literature) — strong confirmation the whole Phase 1 pipeline behaves correctly on real data.
+
+**Caught SMOTE fabricating ~38,000 synthetic rows from 2 real ones.** First real training run used SMOTE (as originally planned) to balance classes. The Q class had only **2 real examples** in the training partition (of 41,848 total rows) — SMOTE oversampled that to match the ~37,782-row N class, an **18,891x amplification**, meaning every "Q" training row beyond the original 2 was a point mathematically interpolated on a single line segment between them. That's fabricating data to reach a number, which directly violates the standing rule against inventing data — caught by actually running the training and inspecting the real numbers, not by inspection alone.
+
+**First fix (sklearn "balanced" class_weight) had the same problem in a different shape.** Replaced SMOTE with `class_weight`, which doesn't invent rows — but sklearn's `"balanced"` heuristic computed a weight of **~4185** for Q (vs ~20 for F, the next-rarest class), and empirically that blew up training just as badly: `val_loss` around 16 versus the ~1.6 random-guessing baseline for 5 classes, because a single Q example in a batch dominated the gradient.
+
+**Final fix: cap the class weight, derived from the data, not memorized.** Capped the largest weight at the second-highest naturally-occurring weight in that run's own distribution (not a hardcoded constant) — self-adjusting if the class distribution ever shifts, and only applied when 3+ classes are present (with exactly 2, "second-highest" is the smaller one, which would collapse both weights to be equal — a real bug caught by the test suite before it shipped). Retrained: `val_loss` back to a sane 1.1-1.8 range, converges in ~12-18 epochs.
+
+**Independent code review caught one more real bug and two real design gaps**, all fixed before merging:
+- **CRITICAL** — `prepare_training_data` mapped `AAMIClass` strings to indices with a bare, unguarded `.map()`, unlike `encode_labels` right next to it which already validated. An unrecognized class value would silently become `NaN` → get cast to integer `0` by `to_categorical` → silently train as class "N" with no error at all. Consolidated the mapping into a new shared `training/class_encoding.py` (both `train.py` and `evaluate.py` had independently reimplemented `CLASS_TO_INDEX`) so the validation can't drift out of sync between files again.
+- **HIGH** — the group-aware validation split is seed-dependent, and on the real run only 2 of DS1's 8 total Q rows landed in training purely because of which patient records the split drew — a different seed could zero Q out of training entirely with nothing surfacing that fact. Added `warn_on_missing_classes()` plus per-class train/validation counts in `training_config.json`.
+- **HIGH** (the cap-derivation fix above) — flagged as a defensible-but-brittle hardcoded constant; fixed by deriving it from the run's own data.
+
+**Final real result, after all fixes**: DS2 accuracy **63.22%**. Honestly far below the original (leaky) pipeline's ~98-99%, and that's the entire point — this reflects true inter-patient generalization, not memorized patient identity. Per-class breakdown: N Se=64.8%/PPV=95.1%, S Se=24.5%/PPV=13.1%, V Se=64.6%/PPV=21.8%, F Se=61.3%/PPV=3.6%, Q Se=0%/PPV=0% (expected — only 2 training examples exist for it). Minority-class precision is weak (lots of false alarms) because of the aggressive class weighting needed to get any recall at all on such rare classes — a real, expected precision/recall tradeoff, not a bug. This is a first correct baseline, not a tuned final model; comparing against the published benchmarks researched in Phase 0 suggests real room for improvement via richer features or a different architecture, which is future work, not something silently attempted here without saying so.
+
+108 tests, 94% combined coverage. PR open (`phase-2-dataset-training` → `v2.0.0`), awaiting review.
+
+**Next up:** Phase 3 — FastAPI backend (once Phase 2 is reviewed and merged).
