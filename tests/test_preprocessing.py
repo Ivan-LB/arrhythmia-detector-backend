@@ -1,7 +1,12 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
+import wfdb
 
 from ecg_pipeline import preprocessing
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestFindMliiChannel:
@@ -137,3 +142,74 @@ class TestMinMaxNormalize:
         signal[3] += 1e-14
         normalized = preprocessing.min_max_normalize(signal)
         np.testing.assert_array_equal(normalized, np.zeros(10))
+
+
+class TestDetectRPeaks:
+    def test_detects_clearly_separated_synthetic_peaks(self):
+        fs = 360.0
+        signal = np.zeros(2000)
+        for center in (300, 700, 1100, 1500):
+            signal[center] = 1.0
+
+        peaks = preprocessing.detect_r_peaks(signal, fs)
+
+        np.testing.assert_array_equal(peaks, [300, 700, 1100, 1500])
+
+    def test_ignores_low_amplitude_noise(self):
+        fs = 360.0
+        rng = np.random.default_rng(0)
+        signal = 0.01 * rng.standard_normal(2000)  # noise only, no real peaks
+        signal[1000] = 1.0  # one genuine peak
+
+        peaks = preprocessing.detect_r_peaks(signal, fs)
+
+        assert list(peaks) == [1000]
+
+    def test_handles_tachycardia_rate_peaks_the_old_0_7s_distance_would_have_missed(self):
+        # 250 bpm -> ~0.24s between beats. The previous pipeline's
+        # find_peaks(distance=int(0.7*fs)) could only detect up to ~86 bpm,
+        # structurally blind to exactly this case -- the clinically
+        # important one (tachycardia, e.g. many V-class runs).
+        fs = 360.0
+        beat_interval_samples = int(0.24 * fs)
+        signal = np.zeros(3000)
+        centers = range(200, 2800, beat_interval_samples)
+        for center in centers:
+            signal[center] = 1.0
+
+        peaks = preprocessing.detect_r_peaks(signal, fs)
+
+        np.testing.assert_array_equal(peaks, list(centers))
+
+    def test_returns_peaks_in_increasing_order(self):
+        fs = 360.0
+        signal = np.zeros(2000)
+        for center in (1500, 300, 1100, 700):  # inserted out of order
+            signal[center] = 1.0
+
+        peaks = preprocessing.detect_r_peaks(signal, fs)
+
+        assert list(peaks) == sorted(peaks)
+
+
+class TestDetectRPeaksAgainstRealData:
+    """Sanity check against a real MIT-BIH record: detected peak count
+    should land in the right ballpark versus the expert-annotated beat
+    count, not be exact (this is an approximate detector for live,
+    unannotated recordings, unlike training which uses ground truth).
+    """
+
+    def test_peak_count_is_close_to_the_annotated_beat_count(self):
+        record_path = str(REPO_ROOT / "Data" / "Dataset" / "Train" / "230")
+        record = wfdb.rdrecord(record_path)
+        annotation = wfdb.rdann(record_path, "atr")
+
+        mlii_index = preprocessing.find_mlii_channel(record.sig_name)
+        signal = record.p_signal[:, mlii_index]
+        filtered = preprocessing.apply_notch_filter(preprocessing.remove_baseline(signal), record.fs)
+
+        peaks = preprocessing.detect_r_peaks(filtered, record.fs)
+        annotated_beat_count = len(annotation.sample)
+
+        ratio = len(peaks) / annotated_beat_count
+        assert 0.85 < ratio < 1.15

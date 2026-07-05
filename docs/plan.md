@@ -42,11 +42,13 @@ Redo the ECG arrhythmia detector with a literature-defensible ML methodology and
 - [x] Independent code review (python-reviewer) — 1 CRITICAL + 2 HIGH findings, all fixed before merge
 - [x] Fixed a real data-completeness gap: 19 of 20 required 100-series MIT-BIH records had no `.atr` annotations committed at all, and one had no `.hea` header — re-fetched clean copies from PhysioNet
 
-### Phase 3 — FastAPI backend
-- [ ] `api/main.py`, `api/inference.py`, `api/schemas.py`
-- [ ] `/records`, `/records/{id}/beats`, `/records/{id}/signal`, `/health`
-- [ ] Config via env vars (no hardcoded paths)
-- [ ] API tests
+### Phase 3 — FastAPI backend ✅ done — see PR `phase-3-fastapi-backend` → `v2.0.0`
+- [x] `api/main.py`, `api/inference.py`, `api/records.py`, `api/schemas.py`
+- [x] `/records`, `/records/{id}/beats`, `/records/{id}/signal`, `/health`
+- [x] Config via env vars (`MODEL_DIR`, required, no implicit "latest" default)
+- [x] API tests — 32 tests, verified against the real running server (uvicorn), not just in-process `TestClient`
+- [x] `ecg_pipeline.preprocessing.detect_r_peaks` — new R-peak detector for live-uploaded recordings with no ground-truth annotations
+- [x] Two parallel code reviews (python-reviewer + security-reviewer) — 1 HIGH security finding (memory-exhaustion DoS), 2 HIGH correctness findings (crash on non-MLII records, no caching/eviction), several MEDIUM fixes, all resolved before merge
 
 ### Phase 4 — React/Next.js frontend
 - [ ] Project scaffold (TypeScript)

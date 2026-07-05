@@ -8,13 +8,19 @@ without a wfdb/MIT-BIH dependency.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import numpy.typing as npt
-from scipy.signal import filtfilt, iirnotch
+from scipy.signal import filtfilt, find_peaks, iirnotch
+
+logger = logging.getLogger(__name__)
 
 NOTCH_FREQ_HZ = 60.0
 NOTCH_QUALITY = 30.0
 WINDOW_SECONDS = 1.0
+R_PEAK_MIN_DISTANCE_SECONDS = 0.2
+R_PEAK_AMPLITUDE_STD_MULTIPLIER = 2.5
 
 
 def find_mlii_channel(signal_names: list[str]) -> int:
@@ -80,6 +86,44 @@ def window_around_sample(
     if start < 0 or end > len(signal):
         return None
     return signal[start:end]
+
+
+def detect_r_peaks(
+    signal: npt.NDArray[np.float64],
+    fs: float,
+    min_distance_seconds: float = R_PEAK_MIN_DISTANCE_SECONDS,
+    amplitude_std_multiplier: float = R_PEAK_AMPLITUDE_STD_MULTIPLIER,
+) -> npt.NDArray[np.intp]:
+    """Detect R-peaks in a filtered signal with no ground-truth annotations
+    -- e.g. a live-uploaded recording via the API. Training and evaluation
+    use the MIT-BIH annotation's own sample index instead (see
+    window_around_sample): that's ground truth, this is an approximation.
+
+    min_distance_seconds=0.2 (300 bpm max) fixes a real gap found in the
+    original project's peak detector, which used distance=0.7*fs (~86 bpm
+    max) -- structurally blind to tachycardia, exactly the clinically
+    important case an arrhythmia classifier most needs to catch.
+
+    The amplitude threshold is relative to the signal's own mean/std
+    (mean + amplitude_std_multiplier standard deviations), not a fixed
+    absolute value, since raw filtered ECG amplitude varies by device/gain.
+
+    An empty signal returns an empty array rather than computing
+    mean/std of nothing: numpy doesn't raise for that, it emits
+    "Mean of empty slice" / "invalid value encountered" RuntimeWarnings
+    and returns NaN, which find_peaks would then silently receive as an
+    unusable height threshold -- surfacing as warning-stream noise on
+    every call for a truncated/zero-length record instead of a clear,
+    explicit signal that nothing could be detected.
+    """
+    if len(signal) == 0:
+        logger.warning("detect_r_peaks called with an empty signal; returning no peaks.")
+        return np.array([], dtype=np.intp)
+
+    height_threshold = np.mean(signal) + amplitude_std_multiplier * np.std(signal)
+    min_distance_samples = int(min_distance_seconds * fs)
+    peaks, _ = find_peaks(signal, distance=min_distance_samples, height=height_threshold)
+    return peaks
 
 
 def min_max_normalize(signal: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
