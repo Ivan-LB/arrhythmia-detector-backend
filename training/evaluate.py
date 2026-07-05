@@ -25,11 +25,11 @@ from tensorflow import keras
 
 from ecg_pipeline import features as features_module
 from ecg_pipeline.labels import AAMI_CLASSES
+from training.class_encoding import class_series_to_indices
 
 logger = logging.getLogger(__name__)
 
 FEATURE_COLUMNS: tuple[str, ...] = features_module.FEATURE_NAMES
-CLASS_TO_INDEX: dict[str, int] = {cls: idx for idx, cls in enumerate(AAMI_CLASSES)}
 
 
 @dataclass(frozen=True)
@@ -99,9 +99,16 @@ def evaluate(model_dir: Path, ds2_csv_path: Path) -> dict:
     scaler = joblib.load(model_dir / "scaler.pkl")
 
     df = pd.read_csv(ds2_csv_path)
+    if len(df) == 0:
+        raise ValueError(
+            f"{ds2_csv_path} has 0 rows -- nothing to evaluate. "
+            "This can happen with an empty-but-valid dataset CSV (e.g. a "
+            "DS1-only record subset); check the file before evaluating it."
+        )
+
     feature_columns = list(FEATURE_COLUMNS)
     X = scaler.transform(df[feature_columns].to_numpy())
-    y_true_indices = df["AAMIClass"].map(CLASS_TO_INDEX).to_numpy()
+    y_true_indices = class_series_to_indices(df["AAMIClass"])
 
     y_pred_probabilities = model.predict(X, verbose=0)
     y_pred_indices = np.argmax(y_pred_probabilities, axis=1)

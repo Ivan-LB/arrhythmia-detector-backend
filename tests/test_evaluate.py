@@ -120,3 +120,59 @@ class TestEvaluateIntegration:
         assert (model_dir / "metrics.json").exists()
         assert 0.0 <= metrics["accuracy"] <= 1.0
         assert metrics["confusion_matrix"].shape == (5, 5)
+
+    def test_raises_a_clear_error_for_an_empty_ds2_csv(self, tmp_path: Path):
+        import pandas as pd
+
+        from training.build_dataset import DATASET_COLUMNS
+        from training.evaluate import evaluate
+        from training.train import train
+
+        feature_columns = [
+            "RPeakCount", "SpectralEnergy", "TotalPSD", "WaveletEnergy",
+            "ShannonEntropy", "SignalSTD", "Skewness", "Kurtosis", "Variance",
+        ]
+        rng = np.random.default_rng(1)
+        rows = [
+            {**{c: rng.standard_normal() for c in feature_columns}, "AAMIClass": "N", "RecordID": rid}
+            for rid in range(1, 11)
+            for _ in range(30)
+        ]
+        ds1_csv = tmp_path / "dataset_ds1.csv"
+        pd.DataFrame(rows).to_csv(ds1_csv, index=False)
+        model_dir = train(ds1_csv, tmp_path / "models", epochs=1, batch_size=16, seed=42)
+
+        # exactly what build_dataset.py writes for a DS1-only record subset:
+        # a valid, correctly-columned, zero-row CSV.
+        empty_ds2_csv = tmp_path / "dataset_ds2.csv"
+        pd.DataFrame(columns=DATASET_COLUMNS).to_csv(empty_ds2_csv, index=False)
+
+        with pytest.raises(ValueError, match="0 rows"):
+            evaluate(model_dir, empty_ds2_csv)
+
+    def test_raises_clearly_on_an_unrecognized_class_in_ds2(self, tmp_path: Path):
+        import pandas as pd
+
+        from training.evaluate import evaluate
+        from training.train import train
+
+        feature_columns = [
+            "RPeakCount", "SpectralEnergy", "TotalPSD", "WaveletEnergy",
+            "ShannonEntropy", "SignalSTD", "Skewness", "Kurtosis", "Variance",
+        ]
+        rng = np.random.default_rng(2)
+        train_rows = [
+            {**{c: rng.standard_normal() for c in feature_columns}, "AAMIClass": "N", "RecordID": rid}
+            for rid in range(1, 11)
+            for _ in range(30)
+        ]
+        ds1_csv = tmp_path / "dataset_ds1.csv"
+        pd.DataFrame(train_rows).to_csv(ds1_csv, index=False)
+        model_dir = train(ds1_csv, tmp_path / "models", epochs=1, batch_size=16, seed=42)
+
+        bad_rows = [{**{c: rng.standard_normal() for c in feature_columns}, "AAMIClass": "TYPO", "RecordID": 100}]
+        ds2_csv = tmp_path / "dataset_ds2.csv"
+        pd.DataFrame(bad_rows).to_csv(ds2_csv, index=False)
+
+        with pytest.raises(ValueError, match="Unknown AAMI class"):
+            evaluate(model_dir, ds2_csv)

@@ -21,11 +21,11 @@ from tensorflow.keras import layers, regularizers
 
 from ecg_pipeline import features as features_module
 from ecg_pipeline.labels import AAMI_CLASSES
+from training.class_encoding import class_series_to_indices, encode_labels
 
 logger = logging.getLogger(__name__)
 
 FEATURE_COLUMNS: tuple[str, ...] = features_module.FEATURE_NAMES
-CLASS_TO_INDEX: dict[str, int] = {cls: idx for idx, cls in enumerate(AAMI_CLASSES)}
 DEFAULT_SEED = 42
 DEFAULT_VALIDATION_FRACTION = 0.15
 
@@ -48,23 +48,35 @@ def split_train_validation(
     return df.iloc[train_idx].reset_index(drop=True), df.iloc[val_idx].reset_index(drop=True)
 
 
-def encode_labels(class_series: pd.Series) -> np.ndarray:
-    """One-hot encode AAMI class labels in a fixed column order (AAMI_CLASSES),
-    not whatever order happens to appear in a given subset -- so train and
-    eval always agree on which column is which class.
+def warn_on_missing_classes(full_df: pd.DataFrame, train_df: pd.DataFrame) -> None:
+    """Log a warning if the group-aware split happened to leave the training
+    partition with zero examples of a class present in the full dataset.
+
+    This is a real, seed-dependent risk, not hypothetical: on a real run,
+    only 2 of DS1's 8 total Q-class rows ended up in the training partition
+    (the other 6, across 2 records, landed in validation) purely because of
+    which patient-groups the split happened to draw. A different seed could
+    just as easily zero Q out of training entirely -- compute_class_weights
+    would silently never assign it a weight, and the model would never see
+    a single training example of it, with nothing surfacing that fact.
     """
-    indices = class_series.map(CLASS_TO_INDEX)
-    if indices.isna().any():
-        unknown = sorted(class_series[indices.isna()].unique())
-        raise ValueError(f"Unknown AAMI class(es) in data: {unknown}")
-    return keras.utils.to_categorical(indices, num_classes=len(AAMI_CLASSES))
+    full_classes = set(full_df["AAMIClass"].unique())
+    train_classes = set(train_df["AAMIClass"].unique())
+    missing = full_classes - train_classes
+    if missing:
+        logger.warning(
+            "Class(es) %s present in the full dataset but ABSENT from the training "
+            "partition after the group-aware split -- the model will never see a "
+            "training example of them. Consider a different seed or a split "
+            "strategy aware of rare-class record placement.",
+            sorted(missing),
+        )
 
 
-MAX_CLASS_WEIGHT = 25.0
-
-
-def compute_class_weights(y_indices: np.ndarray, max_weight: float = MAX_CLASS_WEIGHT) -> dict[int, float]:
-    """Capped inverse-frequency class weights for model.fit(class_weight=...).
+def compute_class_weights(y_indices: np.ndarray) -> dict[int, float]:
+    """Inverse-frequency class weights for model.fit(class_weight=...),
+    with the largest weight capped at the second-largest naturally-occurring
+    weight in this data.
 
     Deliberately NOT SMOTE. An earlier version used SMOTE to fully balance
     classes, but the Q class had as few as 2 real examples in the training
@@ -79,15 +91,28 @@ def compute_class_weights(y_indices: np.ndarray, max_weight: float = MAX_CLASS_W
     rows, "balanced" computes a weight of ~4185 for Q (vs ~20 for F, the next
     rarest class) -- confirmed empirically to blow up the loss (val_loss
     around 16, versus ~1.6 for random guessing on 5 classes) because a
-    single Q example in a batch dominates the gradient. Capping the weight
-    at max_weight keeps Q meaningfully up-weighted relative to N without
-    letting a two-example class destabilize the entire training run. The
-    cap (25) is chosen to sit just above F's natural ~20x weight -- the
-    next-rarest class -- rather than an arbitrary round number.
+    single Q example in a batch dominates the gradient.
+
+    The cap is deliberately computed from this run's own weight
+    distribution (the second-highest raw weight), not a memorized constant:
+    an earlier version hardcoded 25.0 "because that's just above F's ~20x
+    weight" -- reasonable for that one dataset snapshot, but a magic number
+    with no way to notice if a future dataset's second-rarest class shifts
+    and the constant stops meaning anything. Deriving it at call time makes
+    it self-adjusting instead of silently stale.
     """
     present_classes = np.unique(y_indices)
     raw_weights = compute_class_weight("balanced", classes=present_classes, y=y_indices)
-    capped_weights = np.minimum(raw_weights, max_weight)
+    if len(raw_weights) > 2:
+        # With 3+ classes, the second-highest weight is a meaningful
+        # reference point for "the rest of the distribution." With exactly
+        # 2 classes there's no such reference -- capping the larger at the
+        # smaller would collapse them to equal weights regardless of how
+        # different their frequencies actually are, which is wrong.
+        cap = np.sort(raw_weights)[-2]
+        capped_weights = np.minimum(raw_weights, cap)
+    else:
+        capped_weights = raw_weights
     return dict(zip(present_classes.tolist(), capped_weights.tolist()))
 
 
@@ -100,7 +125,7 @@ def prepare_training_data(
     here.
     """
     X = df[feature_columns].to_numpy()
-    y_indices = df["AAMIClass"].map(CLASS_TO_INDEX).to_numpy()
+    y_indices = class_series_to_indices(df["AAMIClass"])
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -142,7 +167,8 @@ def _git_short_sha() -> str:
             capture_output=True, text=True, check=True, timeout=5,
         )
         return result.stdout.strip()
-    except Exception:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+        logger.debug("git sha lookup failed, falling back to 'unknown': %s", error)
         return "unknown"
 
 
@@ -166,6 +192,7 @@ def train(
 
     df = pd.read_csv(ds1_csv_path)
     train_df, val_df = split_train_validation(df, validation_fraction, seed)
+    warn_on_missing_classes(df, train_df)
 
     feature_columns = list(FEATURE_COLUMNS)
     X_train, y_train, scaler, class_weights = prepare_training_data(train_df, feature_columns, seed)
@@ -208,6 +235,8 @@ def train(
         "train_records": sorted(train_df["RecordID"].unique().tolist()),
         "validation_records": sorted(val_df["RecordID"].unique().tolist()),
         "train_rows": len(train_df),
+        "train_class_counts": train_df["AAMIClass"].value_counts().to_dict(),
+        "validation_class_counts": val_df["AAMIClass"].value_counts().to_dict(),
         "class_weights": {AAMI_CLASSES[idx]: weight for idx, weight in class_weights.items()},
     }
     (version_dir / "training_config.json").write_text(json.dumps(training_config, indent=2))

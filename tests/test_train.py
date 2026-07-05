@@ -3,15 +3,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.utils.class_weight import compute_class_weight
 
 from ecg_pipeline.labels import AAMI_CLASSES
 from training.train import (
     build_model,
     compute_class_weights,
-    encode_labels,
     prepare_training_data,
     split_train_validation,
     train,
+    warn_on_missing_classes,
 )
 
 FEATURE_COLUMNS = [
@@ -61,19 +62,25 @@ class TestSplitTrainValidation:
         assert 0.05 < len(val_df) / len(df) < 0.30
 
 
-class TestEncodeLabels:
-    def test_one_hot_shape_matches_number_of_aami_classes(self):
-        encoded = encode_labels(pd.Series(["N", "V", "S"]))
-        assert encoded.shape == (3, len(AAMI_CLASSES))
+class TestWarnOnMissingClasses:
+    def test_logs_a_warning_when_a_class_is_absent_from_training(self, caplog):
+        full_df = pd.DataFrame({"AAMIClass": ["N", "N", "Q", "Q"], "RecordID": [1, 1, 2, 2]})
+        train_df = full_df[full_df["RecordID"] == 1]  # drops record 2 -- Q disappears entirely
 
-    def test_column_order_matches_aami_classes_order(self):
-        encoded = encode_labels(pd.Series(["N"]))
-        expected = [1.0 if cls == "N" else 0.0 for cls in AAMI_CLASSES]
-        np.testing.assert_array_equal(encoded[0], expected)
+        with caplog.at_level("WARNING"):
+            warn_on_missing_classes(full_df, train_df)
 
-    def test_raises_clearly_for_an_unknown_class(self):
-        with pytest.raises(ValueError, match="Unknown AAMI class"):
-            encode_labels(pd.Series(["N", "X"]))
+        assert "Q" in caplog.text
+        assert "ABSENT" in caplog.text
+
+    def test_no_warning_when_every_class_survives_the_split(self, caplog):
+        full_df = pd.DataFrame({"AAMIClass": ["N", "Q"], "RecordID": [1, 2]})
+        train_df = full_df  # nothing dropped
+
+        with caplog.at_level("WARNING"):
+            warn_on_missing_classes(full_df, train_df)
+
+        assert caplog.text == ""
 
 
 class TestComputeClassWeights:
@@ -101,18 +108,37 @@ class TestComputeClassWeights:
         assert weights[2] > weights[0]
         assert np.isfinite(weights[2])
 
-    def test_extreme_imbalance_is_capped_not_left_unbounded(self):
-        # matches the real, observed ratio (~37782 N : 2 Q): uncapped
-        # "balanced" weight would be ~4185, empirically confirmed to blow up
-        # training (val_loss ~16, ~10x higher than random-guessing baseline).
-        y = np.array([0] * 37782 + [1] * 2)
-        weights = compute_class_weights(y, max_weight=25.0)
-        assert weights[1] == pytest.approx(25.0)
+    def test_extreme_outlier_is_capped_at_the_second_highest_natural_weight(self):
+        # matches the real, observed ratio (~37782 N : 2808 V : 2 Q): Q's
+        # uncapped "balanced" weight would be ~2500x V's -- empirically
+        # confirmed at this kind of ratio to blow up training (val_loss ~16,
+        # ~10x the random-guessing baseline). The cap must come from V's
+        # own naturally-occurring weight, not a memorized constant.
+        y = np.array([0] * 37782 + [1] * 2808 + [2] * 2)
+        raw_weights = compute_class_weight("balanced", classes=np.array([0, 1, 2]), y=y)
+        second_highest_raw_weight = np.sort(raw_weights)[-2]
 
-    def test_weight_below_the_cap_is_left_unchanged(self):
-        y = np.array([0] * 100 + [1] * 20)  # raw weight = 120/(2*20) = 3.0, well under the cap
-        weights = compute_class_weights(y, max_weight=25.0)
-        assert weights[1] == pytest.approx(3.0)
+        weights = compute_class_weights(y)
+
+        assert weights[2] == pytest.approx(second_highest_raw_weight)
+        assert weights[2] < 100  # nowhere near the uncapped ~6800 it would otherwise be
+
+    def test_weights_below_the_cap_are_left_unchanged(self):
+        # only 2 classes: nothing to cap against (no "second-highest" to
+        # derive from), so both weights must pass through as sklearn computed them
+        y = np.array([0] * 100 + [1] * 20)
+        weights = compute_class_weights(y)
+        assert weights[1] == pytest.approx(120 / (2 * 20))
+        assert weights[0] == pytest.approx(120 / (2 * 100))
+
+    def test_cap_self_adjusts_to_a_different_data_distribution(self):
+        # same extreme rare-class ratio, but a much rarer "second-highest"
+        # class than the previous test -- the cap must track it, not stay
+        # fixed at whatever a previous run's data happened to produce.
+        y = np.array([0] * 100_000 + [1] * 50 + [2] * 2)
+        weights = compute_class_weights(y)
+        raw_weights = compute_class_weight("balanced", classes=np.array([0, 1, 2]), y=y)
+        assert weights[2] == pytest.approx(np.sort(raw_weights)[-2])
 
 
 class TestPrepareTrainingData:
@@ -155,6 +181,24 @@ class TestPrepareTrainingData:
         X, y, _, class_weights = prepare_training_data(df, FEATURE_COLUMNS, seed=42)
         assert X.shape[0] == y.shape[0] == len(df)
         assert all(np.isfinite(w) for w in class_weights.values())
+
+    def test_raises_on_an_unrecognized_class_instead_of_silently_becoming_n(self):
+        # Regression test for a real bug: prepare_training_data used to call
+        # a bare .map() with no validation, unlike encode_labels next to it.
+        # An unrecognized class mapped to NaN, which promoted y_indices to
+        # float64; keras.utils.to_categorical then cast that NaN to int64,
+        # which NumPy silently resolves to 0 -- i.e. a corrupted label got
+        # silently trained as class "N" with no error and no log line.
+        rng = np.random.default_rng(7)
+        rows = [
+            {**{c: rng.standard_normal() for c in FEATURE_COLUMNS}, "AAMIClass": "N", "RecordID": 1}
+            for _ in range(10)
+        ]
+        rows.append({**{c: rng.standard_normal() for c in FEATURE_COLUMNS}, "AAMIClass": "TYPO", "RecordID": 1})
+        df = pd.DataFrame(rows)
+
+        with pytest.raises(ValueError, match="Unknown AAMI class"):
+            prepare_training_data(df, FEATURE_COLUMNS, seed=42)
 
 
 class TestBuildModel:
