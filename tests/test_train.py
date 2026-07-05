@@ -6,8 +6,8 @@ import pytest
 
 from ecg_pipeline.labels import AAMI_CLASSES
 from training.train import (
-    _smote_k_neighbors,
     build_model,
+    compute_class_weights,
     encode_labels,
     prepare_training_data,
     split_train_validation,
@@ -76,21 +76,43 @@ class TestEncodeLabels:
             encode_labels(pd.Series(["N", "X"]))
 
 
-class TestSmoteKNeighbors:
-    def test_uses_default_5_when_classes_are_plentiful(self):
-        y = np.array([0] * 100 + [1] * 100)
-        assert _smote_k_neighbors(y) == 5
+class TestComputeClassWeights:
+    def test_rarer_class_gets_a_higher_weight(self):
+        # 100 examples of class 0, 5 of class 1 -- class 1 must be weighted higher
+        y = np.array([0] * 100 + [1] * 5)
+        weights = compute_class_weights(y)
+        assert weights[1] > weights[0]
 
-    def test_shrinks_below_the_smallest_class_count(self):
-        # only 3 examples of class 1 -- k_neighbors must be < 3
-        y = np.array([0] * 100 + [1] * 3)
-        k = _smote_k_neighbors(y)
-        assert k < 3
-        assert k >= 1
+    def test_balanced_classes_get_equal_weight(self):
+        y = np.array([0] * 50 + [1] * 50)
+        weights = compute_class_weights(y)
+        assert weights[0] == pytest.approx(weights[1])
 
-    def test_never_returns_less_than_1(self):
-        y = np.array([0] * 100 + [1] * 2)
-        assert _smote_k_neighbors(y) >= 1
+    def test_only_present_classes_get_a_weight(self):
+        # class 2 (e.g. "V") never appears in this partition
+        y = np.array([0] * 50 + [1] * 50)
+        weights = compute_class_weights(y)
+        assert set(weights.keys()) == {0, 1}
+
+    def test_handles_a_class_with_only_2_examples_without_crashing(self):
+        # the real, observed case: Q had only 2 examples in one training partition
+        y = np.array([0] * 100 + [1] * 20 + [2] * 2)
+        weights = compute_class_weights(y)
+        assert weights[2] > weights[0]
+        assert np.isfinite(weights[2])
+
+    def test_extreme_imbalance_is_capped_not_left_unbounded(self):
+        # matches the real, observed ratio (~37782 N : 2 Q): uncapped
+        # "balanced" weight would be ~4185, empirically confirmed to blow up
+        # training (val_loss ~16, ~10x higher than random-guessing baseline).
+        y = np.array([0] * 37782 + [1] * 2)
+        weights = compute_class_weights(y, max_weight=25.0)
+        assert weights[1] == pytest.approx(25.0)
+
+    def test_weight_below_the_cap_is_left_unchanged(self):
+        y = np.array([0] * 100 + [1] * 20)  # raw weight = 120/(2*20) = 3.0, well under the cap
+        weights = compute_class_weights(y, max_weight=25.0)
+        assert weights[1] == pytest.approx(3.0)
 
 
 class TestPrepareTrainingData:
@@ -98,39 +120,41 @@ class TestPrepareTrainingData:
         rng = np.random.default_rng(3)
         df = _synthetic_dataset(rows_per_record=30, record_ids=[1, 2, 3], rng=rng)
 
-        _, _, scaler = prepare_training_data(df, FEATURE_COLUMNS, seed=42)
+        _, _, scaler, _ = prepare_training_data(df, FEATURE_COLUMNS, seed=42)
 
         # a fitted StandardScaler exposes mean_/scale_ sized to the feature count
         assert scaler.mean_.shape == (len(FEATURE_COLUMNS),)
 
-    def test_output_classes_are_balanced_after_smote(self):
+    def test_does_not_invent_any_rows(self):
+        # No SMOTE: an earlier version balanced classes by oversampling, which
+        # amplified a 2-example class to ~38,000 rows on a real run -- purely
+        # interpolated between 2 points, not real data. class_weight must not
+        # change the row count at all.
         rng = np.random.default_rng(4)
         rows = []
-        # deliberately imbalanced: 50 "N", 5 "V"
         for _ in range(50):
             rows.append({**{c: rng.standard_normal() for c in FEATURE_COLUMNS}, "AAMIClass": "N", "RecordID": 1})
         for _ in range(5):
             rows.append({**{c: rng.standard_normal() for c in FEATURE_COLUMNS}, "AAMIClass": "V", "RecordID": 1})
         df = pd.DataFrame(rows)
 
-        X, y, _ = prepare_training_data(df, FEATURE_COLUMNS, seed=42)
+        X, y, _, _ = prepare_training_data(df, FEATURE_COLUMNS, seed=42)
 
-        class_counts = y.sum(axis=0)
-        present_classes = class_counts[class_counts > 0]
-        assert len(set(present_classes)) == 1  # every present class has equal count after SMOTE
-        assert X.shape[0] == y.shape[0]
+        assert X.shape[0] == len(df)
+        assert y.shape[0] == len(df)
 
     def test_handles_a_very_rare_class_without_crashing(self):
         rng = np.random.default_rng(5)
         rows = []
         for _ in range(50):
             rows.append({**{c: rng.standard_normal() for c in FEATURE_COLUMNS}, "AAMIClass": "N", "RecordID": 1})
-        for _ in range(2):  # fewer than SMOTE's default k_neighbors=5 requires
+        for _ in range(2):  # the real, observed minimum for the Q class
             rows.append({**{c: rng.standard_normal() for c in FEATURE_COLUMNS}, "AAMIClass": "Q", "RecordID": 1})
         df = pd.DataFrame(rows)
 
-        X, y, _ = prepare_training_data(df, FEATURE_COLUMNS, seed=42)
-        assert X.shape[0] == y.shape[0]
+        X, y, _, class_weights = prepare_training_data(df, FEATURE_COLUMNS, seed=42)
+        assert X.shape[0] == y.shape[0] == len(df)
+        assert all(np.isfinite(w) for w in class_weights.values())
 
 
 class TestBuildModel:

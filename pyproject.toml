@@ -10,7 +10,6 @@ dependencies = [
     "wfdb>=4.1",
     "pandas>=2.0",
     "scikit-learn>=1.4",
-    "imbalanced-learn>=0.12",
     "tensorflow>=2.16",
     "joblib>=1.3",
 ]

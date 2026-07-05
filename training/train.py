@@ -13,10 +13,9 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
 from tensorflow import keras
 from tensorflow.keras import layers, regularizers
 
@@ -29,7 +28,6 @@ FEATURE_COLUMNS: tuple[str, ...] = features_module.FEATURE_NAMES
 CLASS_TO_INDEX: dict[str, int] = {cls: idx for idx, cls in enumerate(AAMI_CLASSES)}
 DEFAULT_SEED = 42
 DEFAULT_VALIDATION_FRACTION = 0.15
-DEFAULT_SMOTE_K_NEIGHBORS = 5
 
 
 def set_seeds(seed: int) -> None:
@@ -62,36 +60,54 @@ def encode_labels(class_series: pd.Series) -> np.ndarray:
     return keras.utils.to_categorical(indices, num_classes=len(AAMI_CLASSES))
 
 
-def _smote_k_neighbors(y_indices: np.ndarray) -> int:
-    """SMOTE's k_neighbors must be smaller than the smallest present class's
-    count. The Q class has as few as 7-8 examples in all of DS1, and shrinks
-    further once the validation split removes a few records -- the default
-    k_neighbors=5 can and does become invalid in practice, not just in theory.
+MAX_CLASS_WEIGHT = 25.0
+
+
+def compute_class_weights(y_indices: np.ndarray, max_weight: float = MAX_CLASS_WEIGHT) -> dict[int, float]:
+    """Capped inverse-frequency class weights for model.fit(class_weight=...).
+
+    Deliberately NOT SMOTE. An earlier version used SMOTE to fully balance
+    classes, but the Q class had as few as 2 real examples in the training
+    partition on a real run -- balancing that to match ~38,000 N-class rows
+    means ~18,900x oversampling, i.e. nearly 38,000 "Q" training rows
+    mathematically interpolated from a single line segment between 2 real
+    points. That's fabricating data to reach a number, not a legitimate
+    imbalance-handling technique.
+
+    Switching to plain sklearn "balanced" class_weight has the same root
+    problem in a different shape: with only 2 real Q examples out of ~41,848
+    rows, "balanced" computes a weight of ~4185 for Q (vs ~20 for F, the next
+    rarest class) -- confirmed empirically to blow up the loss (val_loss
+    around 16, versus ~1.6 for random guessing on 5 classes) because a
+    single Q example in a batch dominates the gradient. Capping the weight
+    at max_weight keeps Q meaningfully up-weighted relative to N without
+    letting a two-example class destabilize the entire training run. The
+    cap (25) is chosen to sit just above F's natural ~20x weight -- the
+    next-rarest class -- rather than an arbitrary round number.
     """
-    class_counts = np.bincount(y_indices)
-    smallest_class_count = int(class_counts[class_counts > 0].min())
-    return max(1, min(DEFAULT_SMOTE_K_NEIGHBORS, smallest_class_count - 1))
+    present_classes = np.unique(y_indices)
+    raw_weights = compute_class_weight("balanced", classes=present_classes, y=y_indices)
+    capped_weights = np.minimum(raw_weights, max_weight)
+    return dict(zip(present_classes.tolist(), capped_weights.tolist()))
 
 
 def prepare_training_data(
     df: pd.DataFrame, feature_columns: list[str], seed: int
-) -> tuple[np.ndarray, np.ndarray, StandardScaler]:
-    """Fit the scaler on this data only, then SMOTE-balance it.
-
-    Callers must pass only the training partition -- never validation or
-    DS2 -- since both the scaler fit and SMOTE happen here.
+) -> tuple[np.ndarray, np.ndarray, StandardScaler, dict[int, float]]:
+    """Fit the scaler on this data only, encode labels, and compute class
+    weights -- no oversampling. Callers must pass only the training
+    partition -- never validation or DS2 -- since the scaler fit happens
+    here.
     """
     X = df[feature_columns].to_numpy()
     y_indices = df["AAMIClass"].map(CLASS_TO_INDEX).to_numpy()
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    y_encoded = keras.utils.to_categorical(y_indices, num_classes=len(AAMI_CLASSES))
+    class_weights = compute_class_weights(y_indices)
 
-    smote = SMOTE(random_state=seed, k_neighbors=_smote_k_neighbors(y_indices))
-    X_resampled, y_resampled_indices = smote.fit_resample(X_scaled, y_indices)
-    y_resampled = keras.utils.to_categorical(y_resampled_indices, num_classes=len(AAMI_CLASSES))
-
-    return X_resampled, y_resampled, scaler
+    return X_scaled, y_encoded, scaler, class_weights
 
 
 def build_model(input_dim: int, num_classes: int) -> keras.Model:
@@ -152,7 +168,7 @@ def train(
     train_df, val_df = split_train_validation(df, validation_fraction, seed)
 
     feature_columns = list(FEATURE_COLUMNS)
-    X_train, y_train, scaler = prepare_training_data(train_df, feature_columns, seed)
+    X_train, y_train, scaler, class_weights = prepare_training_data(train_df, feature_columns, seed)
     X_val = scaler.transform(val_df[feature_columns].to_numpy())
     y_val = encode_labels(val_df["AAMIClass"])
 
@@ -171,6 +187,7 @@ def train(
         batch_size=batch_size,
         shuffle=True,
         verbose=1,
+        class_weight=class_weights,
         callbacks=callbacks,
     )
 
@@ -190,8 +207,8 @@ def train(
         "aami_classes": list(AAMI_CLASSES),
         "train_records": sorted(train_df["RecordID"].unique().tolist()),
         "validation_records": sorted(val_df["RecordID"].unique().tolist()),
-        "train_rows_before_smote": len(train_df),
-        "train_rows_after_smote": int(X_train.shape[0]),
+        "train_rows": len(train_df),
+        "class_weights": {AAMI_CLASSES[idx]: weight for idx, weight in class_weights.items()},
     }
     (version_dir / "training_config.json").write_text(json.dumps(training_config, indent=2))
 
