@@ -276,6 +276,63 @@ class TestEviction:
             assert set(app.state.records.keys()) == set(ids)
 
 
+class TestCors:
+    """Regression coverage for the missing-CORS-middleware gap found while
+    building the separate arrhythmia-detector-web frontend: a browser
+    fetch() from that app's dev server (http://localhost:3000) failed with
+    a CORS rejection even though curl/TestClient hit the same endpoints
+    fine, since neither of those enforce the browser's same-origin policy.
+    """
+
+    def test_allows_the_configured_frontend_origin(self, client: TestClient):
+        response = client.get("/health", headers={"Origin": "http://localhost:3000"})
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+    def test_preflight_allows_post_to_records_from_the_frontend_origin(self, client: TestClient):
+        response = client.options(
+            "/records",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+    def test_does_not_reflect_an_origin_outside_the_allowlist(self, client: TestClient):
+        response = client.get("/health", headers={"Origin": "http://evil.example.com"})
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers
+
+
+class TestParseCorsAllowedOrigins:
+    """_app_from_env() itself needs a real MODEL_DIR + trained model to
+    exercise, so the parsing rule is covered directly against the
+    extracted pure function instead.
+    """
+
+    def test_returns_the_default_when_the_env_var_is_unset(self):
+        from api.main import DEFAULT_CORS_ALLOWED_ORIGINS, _parse_cors_allowed_origins
+
+        assert _parse_cors_allowed_origins(None) == DEFAULT_CORS_ALLOWED_ORIGINS
+
+    def test_splits_and_strips_a_comma_separated_list(self):
+        from api.main import _parse_cors_allowed_origins
+
+        result = _parse_cors_allowed_origins("http://localhost:3000, https://example.com ,http://a.test")
+        assert result == ("http://localhost:3000", "https://example.com", "http://a.test")
+
+    def test_falls_back_to_the_default_when_every_segment_is_blank(self, caplog: pytest.LogCaptureFixture):
+        from api.main import DEFAULT_CORS_ALLOWED_ORIGINS, _parse_cors_allowed_origins
+
+        with caplog.at_level("WARNING"):
+            result = _parse_cors_allowed_origins(" , ,")
+
+        assert result == DEFAULT_CORS_ALLOWED_ORIGINS
+        assert "no usable origins" in caplog.text
+
+
 class TestGetEndpointsHandleUnexpectedFailuresCleanly:
     def test_get_beats_returns_a_clean_500_not_an_unhandled_crash_if_the_file_disappears(
         self, tmp_path: Path, model_dir: Path
