@@ -25,6 +25,7 @@ from typing import Literal
 import wfdb
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.inference import InferenceBundle, diagnose_beats, load_inference_bundle
 from api.records import MAX_UPLOAD_SIZE_BYTES, InvalidRecordUpload, StoredRecord, save_uploaded_record
@@ -37,6 +38,10 @@ logger = logging.getLogger(__name__)
 SIGNAL_DOWNSAMPLE_TARGET_POINTS = 2000
 UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024  # 1MB
 DEFAULT_MAX_STORED_RECORDS = 50
+# Local dev default only -- matches arrhythmia-detector-web's dev server.
+# Production deployments must override via the CORS_ALLOWED_ORIGINS env var;
+# there is no wildcard fallback, deliberately (see create_app's docstring).
+DEFAULT_CORS_ALLOWED_ORIGINS: tuple[str, ...] = ("http://localhost:3000",)
 
 
 @dataclass
@@ -94,9 +99,15 @@ def create_app(
     model_dir: Path,
     records_dir: Path,
     max_stored_records: int = DEFAULT_MAX_STORED_RECORDS,
+    cors_allowed_origins: tuple[str, ...] = DEFAULT_CORS_ALLOWED_ORIGINS,
 ) -> FastAPI:
     """Build the FastAPI app against a specific model directory and a
     directory to store uploaded records under.
+
+    cors_allowed_origins is an explicit allowlist, never a wildcard: this
+    API sends no cookies/session credentials, so allow_credentials stays
+    False, but reflecting an unbounded '*' origin back is still needless
+    exposure for an endpoint that accepts file uploads.
     """
 
     @asynccontextmanager
@@ -106,6 +117,13 @@ def create_app(
         yield
 
     app = FastAPI(title="Arrhythmia Detector Backend", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(cors_allowed_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
 
     def _get_record_entry(record_id: str) -> _RecordEntry:
         entry = app.state.records.get(record_id)
@@ -248,6 +266,27 @@ def _default_records_dir() -> Path:
     return records_dir
 
 
+def _parse_cors_allowed_origins(cors_env: str | None) -> tuple[str, ...]:
+    """Parse the CORS_ALLOWED_ORIGINS env var (comma-separated) into an
+    origin tuple, falling back to DEFAULT_CORS_ALLOWED_ORIGINS when unset
+    or when every comma-segment is blank after stripping (e.g. "," or " ")
+    -- prevents a typo'd env var from silently locking out every browser
+    origin via allow_origins=[].
+    """
+    if not cors_env:
+        return DEFAULT_CORS_ALLOWED_ORIGINS
+    parsed = tuple(origin.strip() for origin in cors_env.split(",") if origin.strip())
+    if not parsed:
+        logger.warning(
+            "CORS_ALLOWED_ORIGINS was set but contained no usable origins after parsing "
+            "(%r); falling back to the default %r.",
+            cors_env,
+            DEFAULT_CORS_ALLOWED_ORIGINS,
+        )
+        return DEFAULT_CORS_ALLOWED_ORIGINS
+    return parsed
+
+
 def _app_from_env() -> FastAPI:
     import os
 
@@ -260,7 +299,12 @@ def _app_from_env() -> FastAPI:
             "the untraceable-artifact problem this project's model versioning scheme "
             "exists to fix."
         )
-    return create_app(model_dir=Path(model_dir_env), records_dir=_default_records_dir())
+
+    return create_app(
+        model_dir=Path(model_dir_env),
+        records_dir=_default_records_dir(),
+        cors_allowed_origins=_parse_cors_allowed_origins(os.environ.get("CORS_ALLOWED_ORIGINS")),
+    )
 
 
 def __getattr__(name: str):
