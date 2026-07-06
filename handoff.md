@@ -6,9 +6,9 @@ Live state for picking this project back up cold. For the fixed roadmap see [doc
 
 Rebuilding a solo degree-project ECG arrhythmia classifier (`Ivan-LB/Arrhythmia-Detector`, now renamed **`Ivan-LB/arrhythmia-detector-backend`**) into a methodologically-correct, portfolio + academic-grade project. Original repo tagged `v1.0` and frozen as a snapshot. Rebuild happens on branch `v2.0.0`, one phase per branch, PR'd and reviewed before merging into `v2.0.0`. `main` stays untouched until the whole backend rebuild is done — **`v2.0.0` does not get merged to `main` yet.**
 
-**Phases 0-3 are done and merged into `v2.0.0`.** A real trained model exists and a working FastAPI service sits in front of it, verified against a real running server. Two independent threads of work remain, in no required order:
-1. **Phase 5** (repo hygiene) — still in this repo, blocks merging `v2.0.0` → `main`.
-2. **Phase 4** (React/Next.js frontend) — a **new, separate repo** (polyrepo decision, see below), doesn't block this repo at all.
+**Phases 0-5 are all done.** Phases 0-3 (plus CORS + rate-limiting follow-up fixes) are merged into `v2.0.0`. A real trained model exists and a working FastAPI service sits in front of it, verified against a real running server. **Phase 4** (React/Next.js frontend) is done in its own separate repo (`arrhythmia-detector-web`, polyrepo decision, see below) — upload flow, ECG trace + per-beat overlay, and the class-distribution/confidence summary view, all browser-verified against this real API. **Phase 5** (repo hygiene, this repo) is done on branch `phase-5-repo-hygiene`, PR not yet opened/merged as of this writing.
+
+**Next real decision point:** once `phase-5-repo-hygiene` is reviewed and merged into `v2.0.0`, merging `v2.0.0` → `main` is next — but that's explicitly the user's call on timing/how, don't just do it.
 
 Phase 6 (SwiftUI macOS app) is future work, also its own repo, explicitly deferred.
 
@@ -17,7 +17,7 @@ Phase 6 (SwiftUI macOS app) is future work, also its own repo, explicitly deferr
 ```bash
 cd /Users/ivanlorenzanabelli/Projects/Python/Arrhythmia-Detector
 source .venv/bin/activate          # already set up, don't recreate
-python -m pytest tests/ -q         # 151 tests, ~94% coverage, should be green
+python -m pytest tests/ -q         # 168 tests, ~94% coverage, should be green
 MODEL_DIR="$(ls -d models/beat-classifier-*)" uvicorn api.main:app --reload   # run the real API
 ```
 
@@ -32,24 +32,15 @@ MODEL_DIR="$(ls -d models/beat-classifier-*)" uvicorn api.main:app --reload   # 
 - **Verify against real data/real running services, not just mocks.** Several real bugs (SMOTE fabricating data from 2 real examples, a missing-MLII crash, a caching gap that only showed up at real latency) were only caught by actually running things against real MIT-BIH records and a real `uvicorn` server — unit tests with synthetic fixtures alone missed all three.
 - **Never fabricate data to reach a number** (user's standing hard rule) — this directly killed the original SMOTE-based class-imbalance approach; see the Phase 2 entry in `docs/progress.md` for the full story if this comes up again.
 
-## What's next — two independent threads
+## What's next
 
-### Thread A: Phase 5 (repo hygiene, this repo)
-- [ ] `pyproject.toml` with pinned dependencies (currently loose `>=` bounds)
-- [ ] Real `README.md` (setup, usage, dataset download step, links to `docs/`)
-- [ ] `.gitignore` with proper globs (currently has some minimal entries added ad hoc per-phase, needs a real pass)
-- [ ] Document the dataset/model-artifact download-or-regenerate step instead of relying on what's committed
-- [ ] CI (test run on push — this is also a portfolio piece)
-- [ ] Delete `ModelCreation/sineWave.py` (dead code from the original repo, superseded by `ecg_pipeline/features.py`'s Hann windowing)
+Both remaining phases are done. What's left is procedural, not implementation work:
 
-Once this is done: merge `v2.0.0` → `main` in this repo (the user's call on timing/how — ask, don't just do it).
+1. Open the PR for `phase-5-repo-hygiene` → `v2.0.0` (independent code review first, per the standing rule below).
+2. Once the user merges it on GitHub: pull `v2.0.0`, delete the branch locally and on origin.
+3. Ask the user whether/when to merge `v2.0.0` → `main` — their call, don't just do it.
 
-### Thread B: Phase 4 (frontend, new repo)
-Not started. Needs, in order:
-1. Decide/confirm the new repo's name (never discussed yet).
-2. Scaffold a Next.js/TypeScript project there.
-3. Build against the API contract in `docs/system-design.md` §4 (`/health`, `POST /records`, `GET /records/{id}/beats`, `GET /records/{id}/signal` — all implemented and stable).
-4. Upload flow → ECG trace rendering + per-beat classification overlay → summary view (class distribution, confidence).
+Phase 5 left one thing deliberately unresolved rather than deciding unilaterally: `Data/RawData/`, `Data/ecg_features3.csv`, and the legacy `Models/*.h5`/`.pk1` binaries are still tracked in git even though nothing in the rebuilt pipeline (`ecg_pipeline/`, `training/`, `api/`) reads them — they're only used by the original pre-rebuild `UI/`/`ModelCreation/` PyQt app, which is being kept as-is until the new web frontend reaches parity. Untracking them would break a fresh clone's ability to run that old app. Worth a real decision once the old app is finally retired, not before.
 
 The old PyQt `UI/` folder in this repo stays as-is until the new web app has visible functional parity — don't delete it preemptively.
 
