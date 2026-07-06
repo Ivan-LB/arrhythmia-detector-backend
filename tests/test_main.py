@@ -333,6 +333,26 @@ class TestParseCorsAllowedOrigins:
         assert "no usable origins" in caplog.text
 
 
+class TestParseNumericEnv:
+    def test_returns_the_default_when_the_value_is_none(self):
+        from api.main import _parse_numeric_env
+
+        assert _parse_numeric_env("X", None, 42, int) == 42
+        assert _parse_numeric_env("Y", None, 60.0, float) == 60.0
+
+    def test_casts_a_valid_value(self):
+        from api.main import _parse_numeric_env
+
+        assert _parse_numeric_env("X", "7", 42, int) == 7
+        assert _parse_numeric_env("Y", "1.5", 60.0, float) == 1.5
+
+    def test_raises_a_runtime_error_naming_the_variable_and_bad_value_on_invalid_input(self):
+        from api.main import _parse_numeric_env
+
+        with pytest.raises(RuntimeError, match="RATE_LIMIT_MAX_REQUESTS.*not-a-number"):
+            _parse_numeric_env("RATE_LIMIT_MAX_REQUESTS", "not-a-number", 10, int)
+
+
 class TestGetEndpointsHandleUnexpectedFailuresCleanly:
     def test_get_beats_returns_a_clean_500_not_an_unhandled_crash_if_the_file_disappears(
         self, tmp_path: Path, model_dir: Path
@@ -347,3 +367,125 @@ class TestGetEndpointsHandleUnexpectedFailuresCleanly:
 
             assert response.status_code == 500
             assert response.json()["detail"] == f"Failed to process record {record_id!r}"
+
+
+class TestUploadRateLimiter:
+    """Direct unit tests against the sliding-window counter itself -- `now`
+    is an explicit parameter, not read from a real clock, so the window
+    can be exercised deterministically without sleeping in tests.
+    """
+
+    def test_allows_requests_up_to_the_configured_limit(self):
+        from api.main import _UploadRateLimiter
+
+        limiter = _UploadRateLimiter(max_requests=3, window_seconds=60, max_tracked_clients=100)
+
+        assert limiter.check("1.2.3.4", now=0.0) is None
+        assert limiter.check("1.2.3.4", now=1.0) is None
+        assert limiter.check("1.2.3.4", now=2.0) is None
+
+    def test_rejects_the_request_that_exceeds_the_limit(self):
+        from api.main import _UploadRateLimiter
+
+        limiter = _UploadRateLimiter(max_requests=2, window_seconds=60, max_tracked_clients=100)
+        limiter.check("1.2.3.4", now=0.0)
+        limiter.check("1.2.3.4", now=1.0)
+
+        retry_after = limiter.check("1.2.3.4", now=2.0)
+
+        assert retry_after is not None
+        assert retry_after > 0
+
+    def test_tracks_different_clients_independently(self):
+        from api.main import _UploadRateLimiter
+
+        limiter = _UploadRateLimiter(max_requests=1, window_seconds=60, max_tracked_clients=100)
+
+        assert limiter.check("1.2.3.4", now=0.0) is None
+        assert limiter.check("5.6.7.8", now=0.0) is None
+        assert limiter.check("1.2.3.4", now=0.1) is not None  # 1.2.3.4 already used its one slot
+
+    def test_allows_a_request_again_once_the_window_has_elapsed(self):
+        from api.main import _UploadRateLimiter
+
+        limiter = _UploadRateLimiter(max_requests=1, window_seconds=60, max_tracked_clients=100)
+        limiter.check("1.2.3.4", now=0.0)
+
+        assert limiter.check("1.2.3.4", now=59.0) is not None  # still within the window
+        assert limiter.check("1.2.3.4", now=60.1) is None  # window has elapsed
+
+    def test_evicts_the_oldest_tracked_client_once_over_capacity(self):
+        from api.main import _UploadRateLimiter
+
+        limiter = _UploadRateLimiter(max_requests=5, window_seconds=60, max_tracked_clients=2)
+        limiter.check("first", now=0.0)
+        limiter.check("second", now=0.0)
+        limiter.check("third", now=0.0)  # should evict "first"
+
+        assert limiter.check("first", now=0.1) is None  # "first" was evicted, so this reads as a brand-new client
+        assert len(limiter._requests_by_client) == 2
+
+    def test_does_not_evict_a_client_that_was_touched_recently(self):
+        """Regression coverage for a security-review finding: pure
+        FIFO-by-insertion-order eviction let an attacker churn through
+        >max_tracked_clients distinct keys to force-evict (and thereby
+        silently reset the rate limit of) a legitimate client that was
+        still genuinely active. Touching a client must refresh its
+        recency, so only truly-idle entries are ever evicted.
+        """
+        from api.main import _UploadRateLimiter
+
+        limiter = _UploadRateLimiter(max_requests=5, window_seconds=60, max_tracked_clients=2)
+        limiter.check("first", now=0.0)
+        limiter.check("second", now=0.0)
+        limiter.check("first", now=0.1)  # re-touching "first" refreshes its recency
+        limiter.check("third", now=0.2)  # over capacity now -- must evict "second", not "first"
+
+        assert "first" in limiter._requests_by_client
+        assert "second" not in limiter._requests_by_client
+        assert len(limiter._requests_by_client) == 2
+
+
+class TestUploadRateLimitIntegration:
+    """A couple of tests through the real HTTP endpoint to confirm the
+    wiring (status code, Retry-After header, error body) -- the counting
+    logic itself is covered exhaustively above against the plain class.
+    """
+
+    def test_returns_429_with_retry_after_once_the_limit_is_exceeded(self, tmp_path: Path, model_dir: Path):
+        app = create_app(model_dir=model_dir, records_dir=tmp_path / "records", rate_limit_max_requests=2)
+        with TestClient(app) as client:
+            _upload_record_230(client)
+            _upload_record_230(client)
+
+            response = client.post(
+                "/records",
+                files={
+                    "hea_file": ("230.hea", _read_bytes("Data/Dataset/Train/230.hea")),
+                    "dat_file": ("230.dat", _read_bytes("Data/Dataset/Train/230.dat")),
+                },
+            )
+
+            assert response.status_code == 429
+            assert "Retry-After" in response.headers
+            assert response.json()["detail"]
+
+    def test_does_not_rate_limit_get_endpoints(self, tmp_path: Path, model_dir: Path):
+        app = create_app(model_dir=model_dir, records_dir=tmp_path / "records", rate_limit_max_requests=1)
+        with TestClient(app) as client:
+            record_id = _upload_record_230(client)  # uses up the only POST slot
+
+            blocked = client.post(
+                "/records",
+                files={
+                    "hea_file": ("230.hea", _read_bytes("Data/Dataset/Train/230.hea")),
+                    "dat_file": ("230.dat", _read_bytes("Data/Dataset/Train/230.dat")),
+                },
+            )
+            assert blocked.status_code == 429  # confirms the limit really is exhausted
+
+            # GETs against the same app must still work freely even so.
+            for _ in range(5):
+                assert client.get(f"/records/{record_id}/beats").status_code == 200
+                assert client.get(f"/records/{record_id}/signal").status_code == 200
+                assert client.get("/health").status_code == 200

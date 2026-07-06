@@ -17,13 +17,15 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+import time
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 import wfdb
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -42,6 +44,29 @@ DEFAULT_MAX_STORED_RECORDS = 50
 # Production deployments must override via the CORS_ALLOWED_ORIGINS env var;
 # there is no wildcard fallback, deliberately (see create_app's docstring).
 DEFAULT_CORS_ALLOWED_ORIGINS: tuple[str, ...] = ("http://localhost:3000",)
+# POST /records only -- generous enough for real interactive use (upload a
+# handful of records in a session) while blocking a tight retry/spam loop.
+# This is a floor, not a real defense against a motivated attacker: a
+# single-process, in-memory, client-IP-keyed limiter is trivially bypassed
+# by IP rotation (residential/cloud proxy pools), by IPv6 (a client with a
+# /64+ allocation can present a fresh source address per request for
+# free), and entirely defeated by running multiple worker processes (each
+# has its own independent table, so N workers = N times the effective
+# budget with zero coordination). It only stops a naive single-source
+# retry/spam loop -- exactly the threat this was scoped to address after
+# CORS made this endpoint newly reachable from a browser origin. A real
+# production deployment facing genuine abuse needs a shared backend
+# (Redis) keyed at the proxy/edge layer, which is out of scope here.
+DEFAULT_RATE_LIMIT_MAX_REQUESTS = 10
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
+# Bounds memory even if many distinct IPs each send a handful of requests.
+# LRU eviction (not FIFO): a security review found that pure FIFO-by-
+# insertion-order let an attacker churn through >N distinct client keys to
+# force-evict -- and thereby silently reset -- a legitimate client that
+# was genuinely still within its rate-limit window, since a plain dict
+# never reorders an existing key on access. Touching a client now always
+# refreshes its position, so only truly-idle entries are ever evicted.
+DEFAULT_RATE_LIMIT_MAX_TRACKED_CLIENTS = 1000
 
 
 @dataclass
@@ -50,6 +75,69 @@ class _RecordEntry:
     metadata: RecordMetadata
     cached_beats: BeatsResponse | None = None
     cached_signal: SignalResponse | None = None
+
+
+class _UploadRateLimiter:
+    """Sliding-window request counter per client key, applied only to
+    POST /records. In-memory and single-process -- proportionate for a
+    portfolio/demo-scale deployment, the same tradeoff already made by
+    _evict_oldest_if_over_capacity for stored records, not a distributed
+    rate limiter (no cross-process/cross-worker coordination). See
+    DEFAULT_RATE_LIMIT_MAX_REQUESTS's comment for what this does and does
+    not defend against.
+
+    check() takes `now` as an explicit float rather than reading a real
+    clock internally, so callers (and tests) can drive it deterministically
+    -- always pass time.monotonic(), not time.time(), to stay consistent
+    (monotonic is immune to wall-clock/NTP adjustments).
+    """
+
+    def __init__(self, max_requests: int, window_seconds: float, max_tracked_clients: int) -> None:
+        self._max_requests = max_requests
+        self._window_seconds = window_seconds
+        self._max_tracked_clients = max_tracked_clients
+        self._requests_by_client: OrderedDict[str, deque[float]] = OrderedDict()
+
+    def check(self, client_key: str, now: float) -> float | None:
+        """Returns None if the request is allowed (and records it against
+        the client's window), or the number of seconds until the client's
+        oldest in-window request ages out if it's currently over the limit.
+
+        Must be called with no `await` between this call and the point the
+        caller acts on the result -- there's no lock here, relying instead
+        on asyncio's cooperative scheduling (no other coroutine runs between
+        two synchronous statements with no `await` between them) to keep
+        the check-then-record step atomic against concurrent requests.
+        """
+        timestamps = self._requests_by_client.setdefault(client_key, deque())
+        # Touching a client (allowed or not) always refreshes its recency,
+        # so it's never a candidate for eviction while genuinely active --
+        # see _evict_least_recently_used_client_if_over_capacity.
+        self._requests_by_client.move_to_end(client_key)
+
+        cutoff = now - self._window_seconds
+        while timestamps and timestamps[0] <= cutoff:
+            timestamps.popleft()
+
+        if len(timestamps) >= self._max_requests:
+            return timestamps[0] + self._window_seconds - now
+
+        timestamps.append(now)
+        self._evict_least_recently_used_client_if_over_capacity()
+        return None
+
+    def _evict_least_recently_used_client_if_over_capacity(self) -> None:
+        """Evicts the least-recently-touched client once over capacity, not
+        simply the first-ever-seen one: a plain dict never reorders an
+        existing key on access, so pure insertion-order (FIFO) eviction
+        would let an attacker churn through >max_tracked_clients distinct
+        keys to force-evict -- and thereby silently reset -- a legitimate
+        client that was still genuinely within its own rate-limit window.
+        OrderedDict.move_to_end() on every check() closes that gap: only
+        clients that haven't been seen recently are ever evicted.
+        """
+        while len(self._requests_by_client) > self._max_tracked_clients:
+            self._requests_by_client.popitem(last=False)
 
 
 async def _read_upload_within_limit(
@@ -100,6 +188,9 @@ def create_app(
     records_dir: Path,
     max_stored_records: int = DEFAULT_MAX_STORED_RECORDS,
     cors_allowed_origins: tuple[str, ...] = DEFAULT_CORS_ALLOWED_ORIGINS,
+    rate_limit_max_requests: int = DEFAULT_RATE_LIMIT_MAX_REQUESTS,
+    rate_limit_window_seconds: float = DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    rate_limit_max_tracked_clients: int = DEFAULT_RATE_LIMIT_MAX_TRACKED_CLIENTS,
 ) -> FastAPI:
     """Build the FastAPI app against a specific model directory and a
     directory to store uploaded records under.
@@ -123,6 +214,11 @@ def create_app(
         allow_credentials=False,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
+    )
+    upload_rate_limiter = _UploadRateLimiter(
+        max_requests=rate_limit_max_requests,
+        window_seconds=rate_limit_window_seconds,
+        max_tracked_clients=rate_limit_max_tracked_clients,
     )
 
     def _get_record_entry(record_id: str) -> _RecordEntry:
@@ -154,10 +250,32 @@ def create_app(
 
     @app.post("/records", response_model=RecordMetadata)
     async def upload_record(
+        request: Request,
         hea_file: UploadFile = File(...),
         dat_file: UploadFile = File(...),
         atr_file: UploadFile | None = File(None),
     ) -> RecordMetadata:
+        # request.client.host is the actual TCP peer -- deliberately not
+        # X-Forwarded-For or similar, which any client can set to any value
+        # (including someone else's IP) and would defeat the point. request
+        # .client is None only for unusual transports (some ASGI test/proxy
+        # setups), not a normal path for a real networked HTTP client; the
+        # "unknown" fallback means any such requests share one bucket,
+        # which is an accepted edge case, not a normal-path concern. Note
+        # this key collapses to one shared value per real client if this
+        # service is ever run behind a reverse proxy that doesn't forward
+        # the original peer address -- that's a deployment-topology
+        # decision to make consciously if/when it applies, not something
+        # this code silently gets right by default.
+        client_key = request.client.host if request.client else "unknown"
+        retry_after = upload_rate_limiter.check(client_key, now=time.monotonic())
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many upload requests -- try again shortly.",
+                headers={"Retry-After": str(max(1, int(retry_after) + 1))},
+            )
+
         try:
             hea_content = await _read_upload_within_limit(hea_file, "hea file")
             dat_content = await _read_upload_within_limit(dat_file, "dat file")
@@ -287,6 +405,24 @@ def _parse_cors_allowed_origins(cors_env: str | None) -> tuple[str, ...]:
     return parsed
 
 
+_NumberT = TypeVar("_NumberT", int, float)
+
+
+def _parse_numeric_env(env_var_name: str, raw_value: str | None, default: _NumberT, cast: type[_NumberT]) -> _NumberT:
+    """Parse an optional numeric env var's already-fetched value, raising a
+    clear RuntimeError naming the variable and the bad input rather than
+    letting a raw ValueError from int()/float() propagate -- matches the
+    MODEL_DIR check's fail-fast-with-context precedent above instead of an
+    unguided traceback on a startup-time typo.
+    """
+    if raw_value is None:
+        return default
+    try:
+        return cast(raw_value)
+    except ValueError as error:
+        raise RuntimeError(f"{env_var_name} must be a valid number; got {raw_value!r}") from error
+
+
 def _app_from_env() -> FastAPI:
     import os
 
@@ -304,6 +440,24 @@ def _app_from_env() -> FastAPI:
         model_dir=Path(model_dir_env),
         records_dir=_default_records_dir(),
         cors_allowed_origins=_parse_cors_allowed_origins(os.environ.get("CORS_ALLOWED_ORIGINS")),
+        rate_limit_max_requests=_parse_numeric_env(
+            "RATE_LIMIT_MAX_REQUESTS",
+            os.environ.get("RATE_LIMIT_MAX_REQUESTS"),
+            DEFAULT_RATE_LIMIT_MAX_REQUESTS,
+            int,
+        ),
+        rate_limit_window_seconds=_parse_numeric_env(
+            "RATE_LIMIT_WINDOW_SECONDS",
+            os.environ.get("RATE_LIMIT_WINDOW_SECONDS"),
+            DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            float,
+        ),
+        rate_limit_max_tracked_clients=_parse_numeric_env(
+            "RATE_LIMIT_MAX_TRACKED_CLIENTS",
+            os.environ.get("RATE_LIMIT_MAX_TRACKED_CLIENTS"),
+            DEFAULT_RATE_LIMIT_MAX_TRACKED_CLIENTS,
+            int,
+        ),
     )
 
 
