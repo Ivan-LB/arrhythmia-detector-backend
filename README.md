@@ -6,6 +6,21 @@ ECG heartbeat classifier: a windowed-feature-engineering pipeline (FFT/PSD, wave
 
 This is a from-scratch rebuild of an earlier degree-project version (tagged `v1.0`), redone with a leakage-free inter-patient evaluation protocol and a properly decoupled architecture. See [handoff.md](handoff.md) for the current project state and [docs/](docs/) for the full design record.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    A["Raw WFDB records<br/>Data/Dataset/"] --> B["ecg_pipeline<br/>preprocessing + features"]
+    B --> C["training/build_dataset.py<br/>DS1/DS2 feature CSVs"]
+    C --> D["training/train.py<br/>model artifact"]
+    D --> E["training/evaluate.py<br/>DS2 metrics"]
+    D --> F["api/ FastAPI service"]
+    F -->|"POST /records"| G["Uploaded record<br/>+ beat annotations/detection"]
+    G -->|"GET .../beats, .../signal"| H["Frontend<br/>arrhythmia-detector-web"]
+```
+
+`ecg_pipeline/` is the single source of truth for preprocessing and feature extraction — both `training/` (offline, batch, ground-truth annotations) and `api/` (online, single-record, self-detected or annotated beats) call into it rather than each reimplementing it. Full detail in [docs/system-design.md](docs/system-design.md).
+
 ## Repo layout
 
 | Path | What it is |
@@ -75,6 +90,59 @@ Relevant environment variables, all optional:
 | `RATE_LIMIT_MAX_REQUESTS` | `10` | Max `POST /records` uploads per client per window |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window size, in seconds |
 | `RATE_LIMIT_MAX_TRACKED_CLIENTS` | `1000` | LRU cap on tracked client entries |
+
+### Example
+
+Real requests against a real running instance (`uvicorn api.main:app`), uploading MIT-BIH record 230 — nothing fabricated below, output only trimmed for length.
+
+```bash
+curl -s -X POST http://localhost:8000/records \
+  -F "hea_file=@Data/Dataset/Train/230.hea" \
+  -F "dat_file=@Data/Dataset/Train/230.dat" \
+  -F "atr_file=@Data/Dataset/Train/230.atr"
+```
+
+```json
+{
+  "record_id": "f5ce06e91e384c73878c3bc3fd74dd8a",
+  "duration_seconds": 1805.56,
+  "sampling_rate": 360.0,
+  "lead_names": ["MLII", "V1"]
+}
+```
+
+```bash
+curl -s http://localhost:8000/records/f5ce06e91e384c73878c3bc3fd74dd8a/beats
+```
+
+```json
+{
+  "record_id": "f5ce06e91e384c73878c3bc3fd74dd8a",
+  "beat_source": "annotations",
+  "beats": [
+    { "sample_index": 349, "time_seconds": 0.97, "aami_class": "N", "confidence": 0.8884 },
+    { "sample_index": 616, "time_seconds": 1.71, "aami_class": "N", "confidence": 0.8109 },
+    { "sample_index": 880, "time_seconds": 2.44, "aami_class": "N", "confidence": 0.9083 }
+  ]
+}
+```
+
+`beats` has 2464 entries total for this record (only the first 3 shown). `beat_source` is `"annotations"` here because an `.atr` file was uploaded; omit it and the API falls back to `"detected"`, running its own R-peak detector instead of trusting ground truth.
+
+```bash
+curl -s http://localhost:8000/records/f5ce06e91e384c73878c3bc3fd74dd8a/signal
+```
+
+```json
+{
+  "record_id": "f5ce06e91e384c73878c3bc3fd74dd8a",
+  "sampling_rate": 360.0,
+  "downsample_factor": 325,
+  "samples": [-0.2099, -0.3655, -0.3371, 0.1504, -0.1592, "... 1995 more"]
+}
+```
+
+`samples` is the whole record downsampled to ~2000 points (here, every 325th sample) — the entire trace in one response, not a truncated first-few-seconds slice.
 
 ## Dataset
 
