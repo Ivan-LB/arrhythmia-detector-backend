@@ -50,19 +50,19 @@ Redo the ECG arrhythmia detector with a literature-defensible ML methodology and
 - [x] `ecg_pipeline.preprocessing.detect_r_peaks` — new R-peak detector for live-uploaded recordings with no ground-truth annotations
 - [x] Two parallel code reviews (python-reviewer + security-reviewer) — 1 HIGH security finding (memory-exhaustion DoS), 2 HIGH correctness findings (crash on non-MLII records, no caching/eviction), several MEDIUM fixes, all resolved before merge
 
-### Phase 4 — React/Next.js frontend
-- [ ] Project scaffold (TypeScript)
-- [ ] File upload → record metadata
-- [ ] ECG trace rendering + per-beat classification overlay
-- [ ] Summary view (class distribution, confidence)
+### Phase 4 — React/Next.js frontend ✅ done — own repo (`arrhythmia-detector-web`)
+- [x] Project scaffold (TypeScript)
+- [x] File upload → record metadata
+- [x] ECG trace rendering + per-beat classification overlay
+- [x] Summary view (class distribution, confidence)
 
-### Phase 5 — Repo hygiene
-- [ ] `pyproject.toml` with pinned dependencies
-- [ ] Real `README.md` (setup, usage, dataset download step, architecture doc links)
-- [ ] `.gitignore` with proper globs
-- [ ] Dataset/model artifacts documented as a download/regeneration step instead of committed to git
-- [ ] CI (test run on push, given this is also a portfolio piece)
-- [ ] Delete `ModelCreation/sineWave.py` — unused DSP coursework utility (different author); its one relevant idea (Hann windowing before FFT) is absorbed directly into `ecg_pipeline/features.py` via a plain `np.hanning()` call, so the file itself adds nothing
+### Phase 5 — Repo hygiene ✅ done — see PR `phase-5-repo-hygiene` → `v2.0.0`
+- [x] `pyproject.toml` with pinned dependencies
+- [x] Real `README.md` (setup, usage, dataset download step, architecture doc links)
+- [x] `.gitignore` with proper globs
+- [x] Dataset/model artifacts documented as a download/regeneration step instead of committed to git
+- [x] CI (test run on push, given this is also a portfolio piece)
+- [x] Delete `ModelCreation/sineWave.py` — unused DSP coursework utility (different author); its one relevant idea (Hann windowing before FFT) is absorbed directly into `ecg_pipeline/features.py` via a plain `np.hanning()` call, so the file itself adds nothing
 
 ### Phase 6 — SwiftUI macOS app (future)
 - [ ] Deferred until Phases 1–5 are solid. Consumes the same API contract as the web app.

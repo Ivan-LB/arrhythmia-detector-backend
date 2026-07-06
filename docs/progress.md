@@ -4,7 +4,7 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 
 ## Current status
 
-**Phases 0-2 merged into `v2.0.0`. Phase 3 done, PR open awaiting review** (not yet merged). `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Real trained model + DS2 evaluation exist (63.22% accuracy — see Phase 2 log entry for what that number does and doesn't mean). A working FastAPI service now sits in front of that model, verified against a real running server, not just in-process tests. Phase 4 (React/Next.js frontend, its own new repo) not started; waits for Phase 3 to merge first.
+**Phases 0-3 merged into `v2.0.0`**, plus two follow-up fixes on the API surface (CORS middleware, upload rate limiting), both merged. `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Real trained model + DS2 evaluation exist (63.22% accuracy — see Phase 2 log entry for what that number does and doesn't mean). A working FastAPI service sits in front of that model, verified against a real running server, not just in-process tests. **Phase 4 (React/Next.js frontend) is done**, in its own new repo (`arrhythmia-detector-web`) per the polyrepo decision — upload flow, ECG trace + per-beat classification overlay, and a class-distribution/confidence summary view all built and browser-verified against this real API. **Phase 5 (repo hygiene, this repo) in progress.**
 
 ## Checklist
 
@@ -31,26 +31,27 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 - [x] `training/class_encoding.py` (added during review — shared, validated class<->index mapping)
 - [x] First versioned model artifact (`beat-classifier-20260705-dc9f983`, DS2 accuracy 63.22%)
 
-### Phase 3 — FastAPI backend ✅ done, PR open
+### Phase 3 — FastAPI backend ✅ merged
 - [x] `api/main.py` / `inference.py` / `records.py` / `schemas.py`
 - [x] Endpoints implemented (`/health`, `POST /records`, `GET /records/{id}/beats`, `GET /records/{id}/signal`)
 - [x] Config via env vars (`MODEL_DIR`, required)
 - [x] API tests (32 tests) + verified against a real running uvicorn server
 - [x] `ecg_pipeline.preprocessing.detect_r_peaks` (new, for live-uploaded recordings with no ground truth)
 - [x] Two parallel code reviews (correctness + security) — all findings fixed
+- [x] Follow-up: CORS middleware (PR #4) and upload rate limiting (PR #5), both merged
 
-### Phase 4 — React/Next.js frontend
-- [ ] Project scaffold
-- [ ] Upload flow
-- [ ] ECG trace + beat overlay
-- [ ] Summary view
+### Phase 4 — React/Next.js frontend ✅ done — own repo (`arrhythmia-detector-web`)
+- [x] Project scaffold (Next.js/TypeScript, designed via `/impeccable`)
+- [x] Upload flow
+- [x] ECG trace rendering + per-beat classification overlay
+- [x] Summary view (class distribution, confidence) + trace-view UX redesign (class breakdown selector, 60s context window)
 
 ### Phase 5 — Repo hygiene
-- [ ] `pyproject.toml`
-- [ ] `README.md`
-- [ ] `.gitignore` fix
-- [ ] Dataset/model download step documented
-- [ ] CI
+- [x] `pyproject.toml` pinned dependencies
+- [x] `README.md`
+- [x] `.gitignore` fix
+- [x] Dataset/model download step documented
+- [x] CI
 
 ### Phase 6 — SwiftUI app (future)
 - [ ] Not started (deferred)
@@ -148,3 +149,32 @@ All fixes verified: 63 tests passing, 100% statement coverage, zero warnings eve
 151 tests, 94% combined coverage, mypy clean. PR open (`phase-3-fastapi-backend` → `v2.0.0`), awaiting review.
 
 **Next up:** Phase 4 — React/Next.js frontend (its own new repo, per the polyrepo decision), once Phase 3 is reviewed and merged.
+
+### 2026-07-05/06 — CORS + upload rate limiting (two follow-up fixes on the merged API)
+
+Phase 3 merged. Two gaps surfaced next, each fixed test-first on its own branch off `v2.0.0`, independently reviewed, then merged via PR.
+
+**CORS (PR #4).** The API had no `CORSMiddleware` at all — confirmed via a real browser (`TypeError: Failed to fetch`, while `curl` against the same endpoint worked fine, so this was a browser-enforced CORS rejection, not a server bug). Added `CORSMiddleware` with a `CORS_ALLOWED_ORIGINS` env var (comma-separated, defaults to `http://localhost:3000`).
+
+**Upload rate limiting (PR #5).** Flagged during the CORS review as a gap: `POST /records` had no rate limiting, so it was open to unbounded upload spam. Added a hand-rolled sliding-window limiter (`_UploadRateLimiter`) rather than adopting `slowapi` — research turned up that `slowapi` has carried an "alpha quality" disclaimer in its own docs without reaching a 1.0 release, not something to depend on for a real control. Two independent review passes converged on the same two real issues, both fixed before merge:
+- Malformed numeric env vars (`RATE_LIMIT_MAX_REQUESTS=abc`) raised an unhandled `ValueError` instead of a clean startup error — fixed via `_parse_numeric_env()`.
+- The original FIFO eviction policy was gameable: an attacker could churn through >1000 distinct client keys to evict a legitimate client's tracked state and reset their own limit. Fixed by switching to LRU eviction (`OrderedDict.move_to_end()` on every access) so eviction always removes the least-recently-active client, not just the oldest-inserted one.
+
+168 tests passing after both merges.
+
+### 2026-07-05 — Phase 4: React/Next.js frontend (own repo)
+
+Built in a new, separate repo (`arrhythmia-detector-web`) per the polyrepo decision in `system-design.md`. Full detail — design-system work (`PRODUCT.md`/`DESIGN.md` via `/impeccable`), TDD history, and real bugs found via browser verification (WCAG contrast failures, a sub-pixel click-target overlap only fixable by reverting to direct per-button handlers, a JS floating-point boundary bug in window-slicing, a two-way filter/selection state-consistency gap) — lives in that repo's own docs, not duplicated here. Summary: upload flow → full-record ECG trace with per-beat AAMI classification → a class breakdown bar (count, %, avg confidence per class, filterable) → a 60-second real-data "context window" around a selected beat (built instead of a fabricated high-resolution zoom, since the `/signal` endpoint's ~2000-point downsampling genuinely doesn't support one) → a beat detail panel scoped to the active filter. Verified throughout against this repo's real running API and real MIT-BIH record 230, not mocks.
+
+### 2026-07-05/06 — Phase 5: repo hygiene
+
+Branched `phase-5-repo-hygiene` off `v2.0.0` (had to catch up a stale local `v2.0.0` to `origin/v2.0.0` first — PR #5 had merged upstream but hadn't been pulled locally yet, a good reminder to verify branch state against the source rather than assume). Worked through the fixed checklist in `plan.md`:
+
+- **`pyproject.toml`** — replaced every loose `>=` bound with an exact pin matching the actual working `.venv` (`numpy==2.5.1`, `tensorflow==2.21.0`, `fastapi==0.139.0`, etc.); `pip check` confirms no broken requirements.
+- **`.gitignore`** — replaced the ad hoc, phase-by-phase entries (including three now-stale Python 3.9-specific literal `.pyc` paths) with proper globs: caches (`.mypy_cache/`, `.ruff_cache/`, `.pytest_cache/`), editors, OS files, build artifacts — on top of the existing derived-CSV and `models/` rules.
+- **CI** — added `.github/workflows/tests.yml`, running the full pytest suite on push/PR against `main` and `v2.0.0`.
+- **`README.md`** — replaced the 2-line placeholder with real setup/usage/dataset docs. Cross-checked every command against the actual scripts before writing it down rather than trusting recall: caught and fixed a wrong argument order for `training/evaluate.py` (`model_dir` first, not the CSV) this way.
+- **Deleted `ModelCreation/sineWave.py`** — confirmed unreferenced anywhere else first. Also found and removed a stale tracked `.pyc` for the same file (`ModelCreation/__pycache__/sineWave.cpython-38.pyc`) that had been accidentally committed before any pycache ignore rule existed.
+- **Dataset/model artifact download step** — documented in the README (`wfdb.dl_database('mitdb', ...)` to re-fetch, `training/build_dataset.py` + `training/train.py` to regenerate the derived CSVs/model). Deliberately did **not** untrack the already-committed raw `Data/Dataset/` records or the legacy `Models/*.h5`/`.pk1` binaries: the test suite genuinely reads real files from `Data/Dataset/Train/` (so untracking would break a fresh CI checkout), and the legacy binaries are still load-bearing for the original PyQt app under `UI/`/`ModelCreation/`, which is explicitly being kept as-is until the new web frontend reaches parity. Flagged for a separate, explicit decision rather than silently deleted.
+
+168 tests still passing throughout (no application code touched, only packaging/docs/CI).
