@@ -6,9 +6,9 @@ Live state for picking this project back up cold. For the fixed roadmap see [doc
 
 Rebuilding a solo degree-project ECG arrhythmia classifier (`Ivan-LB/Arrhythmia-Detector`, now renamed **`Ivan-LB/arrhythmia-detector-backend`**) into a methodologically-correct, portfolio + academic-grade project. Original repo tagged `v1.0` and frozen as a snapshot. Rebuild happens on branch `v2.0.0`, one phase per branch, PR'd and reviewed before merging into `v2.0.0`. `main` stays untouched until the whole backend rebuild is done — **`v2.0.0` does not get merged to `main` yet.**
 
-**Phases 0-5 are all done.** Phases 0-3 (plus CORS + rate-limiting follow-up fixes) are merged into `v2.0.0`. A real trained model exists and a working FastAPI service sits in front of it, verified against a real running server. **Phase 4** (React/Next.js frontend) is done in its own separate repo (`arrhythmia-detector-web`, polyrepo decision, see below) — upload flow, ECG trace + per-beat overlay, and the class-distribution/confidence summary view, all browser-verified against this real API. **Phase 5** (repo hygiene, this repo) is done on branch `phase-5-repo-hygiene`, PR not yet opened/merged as of this writing.
+**Phases 0-5 are all done and merged into `v2.0.0`.** Phases 0-3, the CORS + rate-limiting follow-up fixes, and Phase 5 (repo hygiene, PRs #4-#7) are all merged. A real trained model exists and a working FastAPI service sits in front of it, verified against a real running server. **Phase 4** (React/Next.js frontend) is done in its own separate repo (`arrhythmia-detector-web`, polyrepo decision, see below) — upload flow, ECG trace + per-beat overlay, and the class-distribution/confidence summary view, all browser-verified against this real API. The original pre-rebuild PyQt app (`UI/`, `ModelCreation/`, `Images/`, legacy `Models/*.h5`/`.pk1`, `Data/RawData/`, `Data/ecg_features3.csv`) has been retired now that the web frontend has real functional parity — see the `retire-legacy-ui` branch/PR.
 
-**Next real decision point:** once `phase-5-repo-hygiene` is reviewed and merged into `v2.0.0`, merging `v2.0.0` → `main` is next — but that's explicitly the user's call on timing/how, don't just do it.
+**Next real decision point:** PR #8 (`v2.0.0` → `main`) is open — merging it retires `v1.0` as the active state. Timing/how is explicitly the user's call, don't just do it.
 
 Phase 6 (SwiftUI macOS app) is future work, also its own repo, explicitly deferred.
 
@@ -34,15 +34,13 @@ MODEL_DIR="$(ls -d models/beat-classifier-*)" uvicorn api.main:app --reload   # 
 
 ## What's next
 
-Both remaining phases are done. What's left is procedural, not implementation work:
+All planned implementation work is done. What's left is procedural:
 
-1. Open the PR for `phase-5-repo-hygiene` → `v2.0.0` (independent code review first, per the standing rule below).
-2. Once the user merges it on GitHub: pull `v2.0.0`, delete the branch locally and on origin.
-3. Ask the user whether/when to merge `v2.0.0` → `main` — their call, don't just do it.
+1. Review/merge the `retire-legacy-ui` PR (removes the now-retired original app and its residual artifacts, see below).
+2. Review/merge PR #8 (`v2.0.0` → `main`) whenever ready — their call, don't just do it.
+3. After each PR merges: pull the target branch, delete the merged branch locally and on origin.
 
-Phase 5 left one thing deliberately unresolved rather than deciding unilaterally: `Data/RawData/`, `Data/ecg_features3.csv`, and the legacy `Models/*.h5`/`.pk1` binaries are still tracked in git even though nothing in the rebuilt pipeline (`ecg_pipeline/`, `training/`, `api/`) reads them — they're only used by the original pre-rebuild `UI/`/`ModelCreation/` PyQt app, which is being kept as-is until the new web frontend reaches parity. Untracking them would break a fresh clone's ability to run that old app. Worth a real decision once the old app is finally retired, not before.
-
-The old PyQt `UI/` folder in this repo stays as-is until the new web app has visible functional parity — don't delete it preemptively.
+**The original pre-rebuild PyQt app has been retired**, now that the web frontend has real functional parity (Phase 4 done). Removed: `UI/` (the PyQt app itself), `ModelCreation/` (old training scripts, superseded by `training/`), `Images/` (unreferenced legacy report plots), legacy `Models/*.h5`/`.pk1` binaries (the current model artifact, `models/beat-classifier-*`, is untouched — it's a different, gitignored path), `Data/RawData/` and `Data/ecg_features3.csv` (legacy derived data, unreferenced by the rebuilt pipeline). All of this remains permanently recoverable from the frozen `v1.0` tag if ever needed. Confirmed via repo-wide grep that nothing in `ecg_pipeline/`, `training/`, `api/`, or `tests/` referenced any of it before deleting.
 
 ## Facts worth not re-deriving
 

@@ -38,7 +38,10 @@ Data/dataset_ds2.csv
 
 # Versioned model artifacts (training/train.py) -- large binaries,
 # regeneratable from the dataset + a fixed seed via `python -m training.train`.
-# Lowercase deliberately: distinct from the legacy, tracked, capitalized
-# `Models/` dir (original pre-rebuild PyQt app's artifacts) -- don't merge
-# the two or rename either one without checking git's case-sensitive match.
+# Lowercase deliberately: on a case-insensitive filesystem (e.g. macOS/APFS)
+# this folder physically shares a directory with any capitalized `Models/`
+# path some other tool might create -- don't merge the two or rename either
+# one without checking git's case-sensitive match. (The original pre-rebuild
+# PyQt app's `Models/` artifacts that used to collide here are now retired,
+# not tracked at all -- see docs/progress.md.)
 models/
