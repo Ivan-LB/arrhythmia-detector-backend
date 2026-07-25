@@ -29,7 +29,6 @@ flowchart LR
 | `training/` | Dataset build, model training, and evaluation scripts |
 | `api/` | FastAPI inference service (`api/main.py`) |
 | `Data/Dataset/` | Vendored MIT-BIH raw records (WFDB format) |
-| `Models/`, `UI/`, `ModelCreation/` | Original pre-rebuild PyQt desktop app and its model — kept as-is until the new web frontend reaches feature parity, not part of the rebuilt pipeline |
 | `docs/` | Architecture docs: data pipeline, neural network, system design, plan, dated progress log |
 | `tests/` | pytest suite (168 tests) |
 
