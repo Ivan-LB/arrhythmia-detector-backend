@@ -1,6 +1,6 @@
 # System Design
 
-Status: **design spec for the rebuild**. Describes the target architecture that [data-pipeline-architecture.md](data-pipeline-architecture.md) and [neural-network-architecture.md](neural-network-architecture.md) feed into. Not yet implemented.
+Status: §§1-3 and 5-9 are the original design spec, still accurate. §4 (API contract) is now **implemented** (Phase 3) — updated in place to reflect what actually shipped, including two things the design didn't originally anticipate: the optional `.atr` upload for ground-truth beat centers, and the caching/eviction layer added after a code review found every read recomputing the full pipeline from scratch.
 
 ## 1. Goals and constraints
 
@@ -77,18 +77,23 @@ One explicit non-goal: **this repo is not being generalized into a reusable ECG-
 
 `UI/` (PyQt) is retired only once the web app has visible, functional parity — not deleted as a side effect of this restructure.
 
-## 4. API contract (sketch)
+## 4. API contract — implemented
 
-Not a full OpenAPI spec — just enough to fix the coupling problem and give the frontend something concrete to build against.
+Not a full OpenAPI spec (FastAPI generates the real one at `/docs` and `/openapi.json`) — just the shape.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/records` | `POST` (multipart) | Upload a `.hea`/`.dat` pair; returns a `record_id` and basic metadata (duration, sampling rate, lead names) |
-| `/records/{id}/beats` | `GET` | Returns detected beat window centers (from annotations if present, else a documented fallback detector) and per-beat AAMI classification + confidence |
-| `/records/{id}/signal` | `GET` | Returns the filtered signal (downsampled for plotting) so the frontend can render the ECG trace without re-implementing DSP client-side |
-| `/health` | `GET` | Liveness/readiness — confirms model + scaler loaded successfully (fixes the current import-time crash-with-no-feedback problem) |
+| `/records` | `POST` (multipart) | Upload a `.hea`/`.dat` pair, plus an **optional `.atr`** file with ground-truth beat annotations. Returns a server-generated `record_id` and metadata (duration, sampling rate, lead names). Rejects (400) anything that isn't a genuinely readable wfdb record with an MLII lead present — validated at upload time, not discovered on the first read. |
+| `/records/{id}/beats` | `GET` | Per-beat AAMI classification + confidence. Beat window centers come from the uploaded `.atr` if one was provided (`beat_source: "annotations"`), otherwise from `ecg_pipeline.preprocessing.detect_r_peaks` (`beat_source: "detected"`). Result is cached after the first call. |
+| `/records/{id}/signal` | `GET` | The filtered signal, downsampled to ~2000 points for plotting. Cached after the first call. |
+| `/health` | `GET` | Confirms model + scaler loaded successfully at startup, reports which model version is live. Fixes the original project's import-time-crash-with-no-feedback problem — this API fails to *start* at all with a clear error if the model can't load, rather than crashing on first use. |
 
-Errors are JSON with a `detail` message and appropriate HTTP status — no bare-string returns from internal functions reaching the client, which is what causes the current UI's `ValueError: too many values to unpack` failure mode.
+Errors are JSON with a `detail` message and appropriate HTTP status — no bare-string returns from internal functions reaching the client, which is what caused the original UI's `ValueError: too many values to unpack` failure mode.
+
+**Added after a code review**, not in the original sketch:
+- **Caching**: the first call to `/beats` or `/signal` for a record runs the full filter → detect/read-annotations → extract-features → predict pipeline; every subsequent call for that same record is served from an in-memory cache. Measured against a real ~30-minute MIT-BIH record: first call ~2.3s, every call after ~10ms. Without this, concurrent requests for the same record were found to effectively serialize (CPU/GIL contention on the per-beat feature-extraction loop), not just be slow individually.
+- **Eviction**: uploaded records (in-memory metadata + their on-disk `.hea`/`.dat`/`.atr` files) are capped at a configurable count (default 50) with FIFO eviction, so a long-running instance doesn't grow memory/disk without bound. There's still no TTL/idle-expiry — only a hard count cap — which is proportionate for a portfolio/demo-scale service but would need revisiting for any real deployment.
+- **Upload hardening**: uploads are read in bounded chunks with an early size-abort (an unbounded read-then-check let a single request buffer an arbitrarily large body in memory before the size limit was ever consulted), filenames are rejected outright if they contain path components or control characters, and the blocking disk-write/parse work is offloaded to a thread pool so one upload can't stall the whole event loop (including `/health`) for its duration.
 
 ## 5. Request lifecycle
 

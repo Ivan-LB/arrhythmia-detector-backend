@@ -26,38 +26,43 @@ Redo the ECG arrhythmia detector with a literature-defensible ML methodology and
 - [x] `system-design.md`
 - [x] `neural-network-architecture.md`
 
-### Phase 1 — Shared pipeline package (`ecg_pipeline/`)
-- [ ] `ecg_pipeline/preprocessing.py` — channel selection, notch filter, annotation-driven windowing
-- [ ] `ecg_pipeline/features.py` — 9-feature extraction (FFT, wavelet, statistical)
-- [ ] `ecg_pipeline/labels.py` — AAMI EC57 symbol→class mapping
-- [ ] `ecg_pipeline/splits.py` — DS1/DS2 record lists as a single source of truth
-- [ ] Unit tests for all of the above (pure functions — cheap to test directly)
+### Phase 1 — Shared pipeline package (`ecg_pipeline/`) ✅ done — see PR `phase-1-ecg-pipeline` → `v2.0.0`
+- [x] `ecg_pipeline/preprocessing.py` — channel selection, notch filter (zero-phase), annotation-driven windowing
+- [x] `ecg_pipeline/features.py` — 9-feature extraction (FFT/PSD, wavelet, statistical)
+- [x] `ecg_pipeline/labels.py` — AAMI EC57 symbol→class mapping
+- [x] `ecg_pipeline/splits.py` — DS1/DS2 record lists as a single source of truth
+- [x] Unit tests for all of the above — 63 tests, 100% statement coverage
+- [x] Independent code review (python-reviewer) — 2 CRITICAL + 2 HIGH findings, all fixed before merge
 
-### Phase 2 — Dataset build + training
-- [ ] `training/build_dataset.py` — raw records → `dataset_ds1.csv` / `dataset_ds2.csv`
-- [ ] `training/train.py` — scaler (fit on DS1 only) + SMOTE (DS1 only) + model training, seeded
-- [ ] `training/evaluate.py` — DS2 confusion matrix + per-class Se/P+/Sp table
-- [ ] First versioned model artifact under `models/`
+### Phase 2 — Dataset build + training ✅ done — see PR `phase-2-dataset-training` → `v2.0.0`
+- [x] `training/build_dataset.py` — raw records → `dataset_ds1.csv` / `dataset_ds2.csv` (50,995 / 49,687 real rows)
+- [x] `training/train.py` — scaler (fit on train-only) + capped class weights (not SMOTE — see progress.md) + model training, seeded
+- [x] `training/evaluate.py` — DS2 confusion matrix + per-class Se/Sp/PPV/NPV table
+- [x] First versioned model artifact under `models/` — real DS2 accuracy 63.22%
+- [x] Independent code review (python-reviewer) — 1 CRITICAL + 2 HIGH findings, all fixed before merge
+- [x] Fixed a real data-completeness gap: 19 of 20 required 100-series MIT-BIH records had no `.atr` annotations committed at all, and one had no `.hea` header — re-fetched clean copies from PhysioNet
 
-### Phase 3 — FastAPI backend
-- [ ] `api/main.py`, `api/inference.py`, `api/schemas.py`
-- [ ] `/records`, `/records/{id}/beats`, `/records/{id}/signal`, `/health`
-- [ ] Config via env vars (no hardcoded paths)
-- [ ] API tests
+### Phase 3 — FastAPI backend ✅ done — see PR `phase-3-fastapi-backend` → `v2.0.0`
+- [x] `api/main.py`, `api/inference.py`, `api/records.py`, `api/schemas.py`
+- [x] `/records`, `/records/{id}/beats`, `/records/{id}/signal`, `/health`
+- [x] Config via env vars (`MODEL_DIR`, required, no implicit "latest" default)
+- [x] API tests — 32 tests, verified against the real running server (uvicorn), not just in-process `TestClient`
+- [x] `ecg_pipeline.preprocessing.detect_r_peaks` — new R-peak detector for live-uploaded recordings with no ground-truth annotations
+- [x] Two parallel code reviews (python-reviewer + security-reviewer) — 1 HIGH security finding (memory-exhaustion DoS), 2 HIGH correctness findings (crash on non-MLII records, no caching/eviction), several MEDIUM fixes, all resolved before merge
 
-### Phase 4 — React/Next.js frontend
-- [ ] Project scaffold (TypeScript)
-- [ ] File upload → record metadata
-- [ ] ECG trace rendering + per-beat classification overlay
-- [ ] Summary view (class distribution, confidence)
+### Phase 4 — React/Next.js frontend ✅ done — own repo (`arrhythmia-detector-web`)
+- [x] Project scaffold (TypeScript)
+- [x] File upload → record metadata
+- [x] ECG trace rendering + per-beat classification overlay
+- [x] Summary view (class distribution, confidence)
 
-### Phase 5 — Repo hygiene
-- [ ] `pyproject.toml` with pinned dependencies
-- [ ] Real `README.md` (setup, usage, dataset download step, architecture doc links)
-- [ ] `.gitignore` with proper globs
-- [ ] Dataset/model artifacts documented as a download/regeneration step instead of committed to git
-- [ ] CI (test run on push, given this is also a portfolio piece)
-- [ ] Delete `ModelCreation/sineWave.py` — unused DSP coursework utility (different author); its one relevant idea (Hann windowing before FFT) is absorbed directly into `ecg_pipeline/features.py` via a plain `np.hanning()` call, so the file itself adds nothing
+### Phase 5 — Repo hygiene ✅ done — see PR `phase-5-repo-hygiene` → `v2.0.0`
+- [x] `pyproject.toml` with pinned dependencies
+- [x] Real `README.md` (setup, usage, dataset download step, architecture doc links)
+- [x] `.gitignore` with proper globs
+- [x] Dataset/model artifacts documented as a download/regeneration step instead of committed to git
+- [x] CI (test run on push, given this is also a portfolio piece)
+- [x] Delete `ModelCreation/sineWave.py` — unused DSP coursework utility (different author); its one relevant idea (Hann windowing before FFT) is absorbed directly into `ecg_pipeline/features.py` via a plain `np.hanning()` call, so the file itself adds nothing
 
 ### Phase 6 — SwiftUI macOS app (future)
 - [ ] Deferred until Phases 1–5 are solid. Consumes the same API contract as the web app.
