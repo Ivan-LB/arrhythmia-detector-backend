@@ -4,7 +4,14 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 
 ## Current status
 
+**v2.0 is shipped and tagged.** Everything below through Phase 5 is merged into `main`; `v2.0` is an annotated tag on `daf2ade`. **Current work is v2.1 (beat detection)** — see the `v2.1` section of [plan.md](plan.md) for scope and phases.
+
+<details>
+<summary>Historical status line from during the v2.0 rebuild (kept for the record)</summary>
+
 **Phases 0-3 merged into `v2.0.0`**, plus two follow-up fixes on the API surface (CORS middleware, upload rate limiting), both merged. `v1.0` tag marks the pre-rebuild ("end of degree project") state. Repo renamed to `arrhythmia-detector-backend`. Real trained model + DS2 evaluation exist (63.22% accuracy — see Phase 2 log entry for what that number does and doesn't mean). A working FastAPI service sits in front of that model, verified against a real running server, not just in-process tests. **Phase 4 (React/Next.js frontend) is done**, in its own new repo (`arrhythmia-detector-web`) per the polyrepo decision — upload flow, ECG trace + per-beat classification overlay, and a class-distribution/confidence summary view all built and browser-verified against this real API. **Phase 5 (repo hygiene, this repo) in progress.**
+
+</details>
 
 ## Checklist
 
@@ -55,6 +62,14 @@ Living tracker for the rebuild. Update this as work happens — check items off,
 
 ### Phase 6 — SwiftUI app (future)
 - [ ] Not started (deferred)
+
+### v2.1 — Beat detection (current)
+- [ ] Phase 1 — research & evaluation protocol, `docs/beat-detection-architecture.md`
+- [ ] Phase 2 — windowed high-resolution signal endpoint
+- [ ] Phase 3 — Pan-Tompkins baseline + detection metrics harness
+- [ ] Phase 4 — proposed learned detector, head-to-head vs. baseline
+- [ ] Phase 5 — frontend: high-resolution analysis window + single-beat view
+- [ ] Phase 6 — wire the winning detector into the API
 
 ## Log
 
@@ -192,3 +207,20 @@ Verified before deleting, not assumed: repo-wide grep confirmed none of `ecg_pip
 Nothing here is actually gone for good: the original repo state is permanently preserved under the frozen `v1.0` tag regardless of what happens on `v2.0.0`/`main`.
 
 168 tests still passing (none of the removed code was under test).
+
+### 2026-07-26 — v2.0 shipped and tagged; v2.1 (beat detection) scoped
+
+PRs #8 (`v2.0.0` → `main`) and #9 (retire legacy app) merged. Annotated tag **`v2.0`** pushed on `main` at `daf2ade`. Tag named `v2.0` rather than `v2.0.0` for two reasons: it matches the existing `v1.0` convention, and `v2.0.0` was already taken by the long-lived dev *branch* — same-name tag and branch is an ambiguous-ref footgun worth just not creating. All merged phase branches deleted locally and on origin.
+
+**v2.1 scoped: beat detection.** Two gaps left by v2.0, both confirmed in the code rather than assumed:
+
+- `detect_r_peaks` is a `scipy.find_peaks` heuristic (mean + 2σ amplitude threshold, 0.2s minimum distance), written in Phase 3 as an explicit stopgap and **never evaluated with QRS-detection metrics**. The one number on record for it — "91.5% of the true annotated beat count" — is a *count ratio*, not sensitivity: it says nothing about whether the detected peaks are the right peaks. Measuring it properly is itself a deliverable.
+- `GET /records/{id}/signal` downsamples the whole record to 2000 points (`SIGNAL_DOWNSAMPLE_TARGET_POINTS`). For record 230 that's `downsample_factor=325` — one sample every ~0.9s against a ~0.8s beat period, i.e. roughly **one point per beat**. This is the concrete reason the analysis window reads as an unreadable smear, and it's a backend limit: no amount of frontend work fixes it. Same honest constraint that stopped a fabricated per-beat zoom from being built in v2.0; v2.1 removes the constraint instead of working around it.
+
+User decisions taken (both the recommended option): a classical Pan-Tompkins baseline **and** a proposed learned detector, compared head-to-head on the same protocol — not one or the other; and both a high-resolution analysis window **and** a dedicated single-beat view.
+
+One previously-recorded decision deliberately revisited rather than quietly reversed: v2.0's out-of-scope list rules out "any raw-signal deep learning architecture." That boundary was drawn around the *classifier* and still holds for it. Detection is a different task on a different label space (where is the beat, not what kind), so a raw-signal model there isn't the same call — noted explicitly in `plan.md` so the contradiction isn't left for a future reader to trip over.
+
+Also flagged upfront, before any work starts: Pan-Tompkins is a strong baseline and the proposed learned detector may simply not beat it. If that's what the numbers say, that's what gets reported. Same rule that killed SMOTE in v2.0 Phase 2.
+
+Plan and phase checklist written into `plan.md`; `v2.1` branch created off `main`. No implementation yet — Phase 1 (research + evaluation protocol, verified against primary sources) is the next step.

@@ -4,13 +4,17 @@ Live state for picking this project back up cold. For the fixed roadmap see [doc
 
 ## TL;DR
 
-Rebuilding a solo degree-project ECG arrhythmia classifier (`Ivan-LB/Arrhythmia-Detector`, now renamed **`Ivan-LB/arrhythmia-detector-backend`**) into a methodologically-correct, portfolio + academic-grade project. Original repo tagged `v1.0` and frozen as a snapshot. Rebuild happens on branch `v2.0.0`, one phase per branch, PR'd and reviewed before merging into `v2.0.0`. `main` stays untouched until the whole backend rebuild is done — **`v2.0.0` does not get merged to `main` yet.**
+Solo degree-project ECG arrhythmia classifier (`Ivan-LB/Arrhythmia-Detector`, now renamed **`Ivan-LB/arrhythmia-detector-backend`**), rebuilt into a methodologically-correct, portfolio + academic-grade project. `v1.0` marks the frozen pre-rebuild state; **`v2.0` is tagged on `main`** and marks the completed rebuild.
 
-**Phases 0-5 are all done and merged into `v2.0.0`.** Phases 0-3, the CORS + rate-limiting follow-up fixes, and Phase 5 (repo hygiene, PRs #4-#7) are all merged. A real trained model exists and a working FastAPI service sits in front of it, verified against a real running server. **Phase 4** (React/Next.js frontend) is done in its own separate repo (`arrhythmia-detector-web`, polyrepo decision, see below) — upload flow, ECG trace + per-beat overlay, and the class-distribution/confidence summary view, all browser-verified against this real API. The original pre-rebuild PyQt app (`UI/`, `ModelCreation/`, `Images/`, legacy `Models/*.h5`/`.pk1`, `Data/RawData/`, `Data/ecg_features3.csv`) has been retired now that the web frontend has real functional parity — see the `retire-legacy-ui` branch/PR.
+**Current work: v2.1 — beat detection.** Long-lived branch `v2.1` off `main`, one phase per branch, PR'd and reviewed before merging into `v2.1`, same pattern the v2.0 rebuild used.
 
-**Next real decision point:** PR #8 (`v2.0.0` → `main`) is open — merging it retires `v1.0` as the active state. Timing/how is explicitly the user's call, don't just do it.
+**v2.0 is shipped.** Phases 0-5 all merged (PRs #1-#9), `v2.0.0` merged into `main`, tag `v2.0` pushed, all phase branches deleted. A real trained model exists, a working FastAPI service sits in front of it (verified against a real running server), a React/Next.js frontend in its own repo (`arrhythmia-detector-web`, polyrepo decision, see below) consumes it, and the original PyQt app plus all residual legacy artifacts have been retired.
 
-Phase 6 (SwiftUI macOS app) is future work, also its own repo, explicitly deferred.
+**Now starting v2.1 — beat detection.** Full scope and phase checklist in [docs/plan.md](docs/plan.md) under the `v2.1` heading. The short version: `detect_r_peaks` is a `find_peaks` heuristic that has never been properly evaluated, and `/signal` downsamples to ~1 point per beat so the UI physically can't show beat morphology. v2.1 fixes both — a Pan-Tompkins baseline plus a proposed learned detector compared head-to-head on DS2, a windowed high-resolution signal endpoint, and a UI that shows real beats.
+
+**Two user decisions already made for v2.1** (don't relitigate): (1) both a classical baseline *and* a proposed learned model, compared — not one or the other; (2) both a high-resolution analysis window *and* a single-beat view.
+
+Phase 6 of v2.0 (SwiftUI macOS app) remains future work, its own repo, explicitly deferred.
 
 ## Environment quickstart
 
@@ -26,7 +30,7 @@ MODEL_DIR="$(ls -d models/beat-classifier-*)" uvicorn api.main:app --reload   # 
 ## Standing workflow rules (don't relitigate these)
 
 - **Git identity**: commit as the user (`Belli <ivanlorenzana@outlook.com>`, already the configured git user) — **never add a `Co-Authored-By` line or any AI attribution.**
-- **Branch pattern**: `v2.0.0` is the long-lived dev branch. Each phase gets its own branch off `v2.0.0` (e.g. `phase-4-...`), pushed, PR'd against `v2.0.0`. The user reviews and merges on GitHub themselves — after they say "merged", pull `v2.0.0`, delete the now-merged branch locally and on origin, then start the next phase's branch.
+- **Branch pattern**: a long-lived version branch (`v2.1` now; `v2.0.0` was the v2.0 one) with each phase on its own branch off it (e.g. `v2.1-phase-2-...`), pushed, PR'd against the version branch. The user reviews and merges on GitHub themselves — after they say "merged", pull the version branch, delete the now-merged branch locally and on origin, then start the next phase's branch. The version branch merges to `main` and gets tagged once the release is complete.
 - **TDD, every phase**: write the test, confirm it fails (RED) for the right reason, implement, confirm it passes (GREEN). Every phase so far has followed this and it's caught real bugs before they shipped — keep doing it.
 - **Independent code review before every PR**: at minimum `python-reviewer`; add `security-reviewer` in parallel for anything touching file I/O, uploads, or user input (Phase 3's file-upload surface got both, and the security pass caught a real memory-exhaustion DoS). Fix CRITICAL/HIGH findings before opening the PR, not after.
 - **Verify against real data/real running services, not just mocks.** Several real bugs (SMOTE fabricating data from 2 real examples, a missing-MLII crash, a caching gap that only showed up at real latency) were only caught by actually running things against real MIT-BIH records and a real `uvicorn` server — unit tests with synthetic fixtures alone missed all three.
@@ -34,13 +38,18 @@ MODEL_DIR="$(ls -d models/beat-classifier-*)" uvicorn api.main:app --reload   # 
 
 ## What's next
 
-All planned implementation work is done. What's left is procedural:
+**v2.1 Phase 1 — research & evaluation protocol.** Nothing implemented yet; the plan is written and the `v2.1` branch exists. Start here:
 
-1. Review/merge the `retire-legacy-ui` PR (removes the now-retired original app and its residual artifacts, see below).
-2. Review/merge PR #8 (`v2.0.0` → `main`) whenever ready — their call, don't just do it.
-3. After each PR merges: pull the target branch, delete the merged branch locally and on origin.
+1. Pin the QRS-detection evaluation standard to its **primary source** — the matching tolerance and the exact TP/FP/FN definitions. Do not write these from memory; this project has a standing rule about verifying at the source, and Phase 0 of v2.0 caught real errors by following it.
+2. Confirm Pan-Tompkins' stages against the original paper, not a blog reimplementation.
+3. Decide the learned detector's label formulation and write down the reasoning.
+4. Produce `docs/beat-detection-architecture.md`, then move to Phase 2.
 
-**The original pre-rebuild PyQt app has been retired**, now that the web frontend has real functional parity (Phase 4 done). Removed: `UI/` (the PyQt app itself), `ModelCreation/` (old training scripts, superseded by `training/`), `Images/` (unreferenced legacy report plots), legacy `Models/*.h5`/`.pk1` binaries (the current model artifact, `models/beat-classifier-*`, is untouched — it's a different, gitignored path), `Data/RawData/` and `Data/ecg_features3.csv` (legacy derived data, unreferenced by the rebuilt pipeline). All of this remains permanently recoverable from the frozen `v1.0` tag if ever needed. Confirmed via repo-wide grep that nothing in `ecg_pipeline/`, `training/`, `api/`, or `tests/` referenced any of it before deleting.
+Phases 2 (windowed endpoint) and 5 (frontend) are an independent thread from Phases 3-4 (the model work) and can run alongside them — same two-thread shape v2.0 had with Phases 4 and 5.
+
+**Watch for this trap in Phase 4:** Pan-Tompkins is a genuinely strong baseline. If the learned detector doesn't beat it, report that — do not tune until the number looks good. An honest negative is a real result and the standing rule against fabricating numbers applies to this release exactly as it did to the SMOTE decision in v2.0 Phase 2.
+
+**Already done in v2.0, don't redo:** the original pre-rebuild PyQt app is retired — `UI/`, `ModelCreation/`, `Images/`, the legacy `Models/*.h5`/`.pk1` binaries, `Data/RawData/`, and `Data/ecg_features3.csv` are all gone (permanently recoverable from the frozen `v1.0` tag). The current model artifact `models/beat-classifier-*` is a different, gitignored path and was untouched.
 
 ## Facts worth not re-deriving
 
