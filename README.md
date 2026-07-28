@@ -161,3 +161,4 @@ Citation: Moody GB, Mark RG. "The impact of the MIT-BIH Arrhythmia Database." *I
 - [docs/data-pipeline-architecture.md](docs/data-pipeline-architecture.md) — dataset, splits, feature engineering, AAMI label mapping
 - [docs/neural-network-architecture.md](docs/neural-network-architecture.md) — model architecture, training, real evaluation results
 - [docs/system-design.md](docs/system-design.md) — overall architecture, API contract, repo-split rationale
+- [docs/portfolio-brief.md](docs/portfolio-brief.md) — fact-checked summary of the project, its real numbers, and what can and can't be claimed about them

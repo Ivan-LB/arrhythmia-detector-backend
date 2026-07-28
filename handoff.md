@@ -67,3 +67,4 @@ Phases 2 (windowed endpoint) and 5 (frontend) are an independent thread from Pha
 - [docs/data-pipeline-architecture.md](docs/data-pipeline-architecture.md) — dataset/feature engineering
 - [docs/neural-network-architecture.md](docs/neural-network-architecture.md) — model + training + real results
 - [docs/system-design.md](docs/system-design.md) — overall architecture, API contract, repo split rationale
+- [docs/portfolio-brief.md](docs/portfolio-brief.md) — canonical CV/portfolio source: verified numbers, the framing that makes this project worth showing, and explicit guardrails on what must never be claimed (e.g. never quote the old leaky ~98%). Written for another agent to consume; re-verify its numbers if the model is ever retrained.
